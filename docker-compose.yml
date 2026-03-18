@@ -1,0 +1,28 @@
+# AmneziaWG proxy bridge for local network devices
+# This container provides SOCKS5 (port 1080) and HTTP (port 8080) proxies
+# that route traffic through your AmneziaWG tunnel.
+# Mount your .conf file(s) into /etc/amnezia/amneziawg/
+# docker compose down
+# docker compose up -d
+
+services:
+  amnezia-proxy:
+    image: ghcr.io/mainfrezzer/amnezia-bridge:latest
+    container_name: amnezia-proxy
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    volumes:
+      - ./config:/etc/amnezia/amneziawg/  # Directory with your AmneziaWG .conf file(s)
+    ports:
+      - "0.0.0.0:8200:1080/tcp"  # SOCKS5 proxy (use this for most apps)
+      - "0.0.0.0:9200:8080/tcp"  # HTTP proxy (with CONNECT support for HTTPS)
+    environment:
+      - LAN_NETWORK=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,172.17.0.0/16,169.254.0.0/16  # Local networks to bypass / exclude from tunnel
+      - LAN_NETWORK6=fd00::/8,fe80::/10                                                # IPv6 local ranges (if you have IPv6 at home)
+      - HTTPPORT=8080                                                                  # Internal HTTP proxy port (Privoxy)
+      - ENABLE_RANDOM=0                                                                # Set to 1 to randomly select a config if multiple .conf files are present
+      # DISABLE_TUNNEL_MODE=1                                                          # Uncomment to disable full-tunnel enforcement (split tunneling inside container)
+      # HEALTH_URL_CHECK=https://1.1.1.1                                               # Optional: URL to ping for healthcheck
