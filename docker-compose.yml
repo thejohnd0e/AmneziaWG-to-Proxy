@@ -1,7 +1,7 @@
 # AmneziaWG proxy bridge for local network devices
 # This container provides SOCKS5 (port 1080) and HTTP (port 8080) proxies
 # that route traffic through your AmneziaWG tunnel.
-# Mount your .conf file(s) into /etc/amnezia/amneziawg/
+# Add your .conf file(s) into ./config/ folder
 # docker compose down
 # docker compose up -d
 
