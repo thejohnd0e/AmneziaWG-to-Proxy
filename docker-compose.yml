@@ -1,13 +1,19 @@
 # AmneziaWG proxy bridge for local network devices
 # This container provides SOCKS5 (port 1080) and HTTP (port 8080) proxies
 # that route traffic through your AmneziaWG tunnel.
-# Add your .conf file(s) into ./config/ folder
-# docker compose down
-# docker compose up -d
+# Place your .conf files into ./config/ folder
+#
+# Build and run:
+#   docker compose up -d --build
+#
+# Stop:
+#   docker compose down
 
 services:
   amnezia-proxy:
-    image: ghcr.io/mainfrezzer/amnezia-bridge:latest
+    build:
+      context: .
+    image: amnezia-bridge-failover:local
     container_name: AmneziaWG-to-Proxy
     restart: unless-stopped
     cap_add:
@@ -15,14 +21,25 @@ services:
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
     volumes:
-      - ./config:/etc/amnezia/amneziawg/  # Directory with your AmneziaWG .conf file(s)
+      - ./config:/configs
+      - ./bad_config:/bad_config
     ports:
-      - "0.0.0.0:8200:1080/tcp"  # SOCKS5 proxy (use this for most apps)
-      - "0.0.0.0:9200:8080/tcp"  # HTTP proxy (with CONNECT support for HTTPS)
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:8200:1080/tcp"
+      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:9200:8080/tcp"
     environment:
-      - LAN_NETWORK=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,172.17.0.0/16,169.254.0.0/16  # Local networks to bypass / exclude from tunnel
-      - LAN_NETWORK6=fd00::/8,fe80::/10                                                # IPv6 local ranges (if you have IPv6 at home)
-      - HTTPPORT=8080                                                                  # Internal HTTP proxy port (Privoxy)
-      - ENABLE_RANDOM=0                                                                # Set to 1 to randomly select a config if multiple .conf files are present
-      # DISABLE_TUNNEL_MODE=1                                                          # Uncomment to disable full-tunnel enforcement (split tunneling inside container)
-      # HEALTH_URL_CHECK=https://1.1.1.1                                               # Optional: URL to ping for healthcheck
+      FAILOVER_INTERVAL: ${FAILOVER_INTERVAL:-15}
+      FAILOVER_FAILURES: ${FAILOVER_FAILURES:-3}
+      FAILOVER_TIMEOUT: ${FAILOVER_TIMEOUT:-8}
+      HEALTH_URLS: ${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}
+      HEALTH_URL_CHECK: ${HEALTH_URL_CHECK:-}
+      LAN_NETWORK: ${LAN_NETWORK:-192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,172.17.0.0/16,169.254.0.0/16}
+      LAN_NETWORK6: ${LAN_NETWORK6:-fd00::/8,fe80::/10}
+      HTTPPORT: ${HTTPPORT:-8080}
+      ENABLE_RANDOM: "0"
+      # DISABLE_TUNNEL_MODE: ${DISABLE_TUNNEL_MODE:-}
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/active_config && /check-tunnel.sh"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s

@@ -1,0 +1,65 @@
+#!/bin/bash
+# proxy-checker — CLI wrapper for AmneziaWG config checker
+# Runs the checker in an isolated Docker container.
+#
+# Usage:
+#   ./proxy-checker <config_dir> [--bad-dir <bad_config_dir>]
+#
+# Examples:
+#   ./proxy-checker ./config
+#   ./proxy-checker ./config --bad-dir ./bad_config
+#   ./proxy-checker /etc/amnezia/amneziawg
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_DIR="${1:-}"
+BAD_DIR=""
+
+if [ -z "$CONFIG_DIR" ]; then
+    echo "Usage: $0 <config_dir> [--bad-dir <bad_config_dir>]"
+    echo ""
+    echo "Examples:"
+    echo "  $0 ./config"
+    echo "  $0 ./config --bad-dir ./bad_config"
+    exit 2
+fi
+
+# Parse optional arguments.
+if [ "${2:-}" = "--bad-dir" ]; then
+    BAD_DIR="${3:-}"
+elif [ -n "${2:-}" ]; then
+    echo "ERROR: Unknown argument: $2"
+    echo "Usage: $0 <config_dir> [--bad-dir <bad_config_dir>]"
+    exit 2
+fi
+
+# Resolve to absolute path
+CONFIG_DIR="$(cd "$CONFIG_DIR" && pwd)"
+
+# Default bad_config relative to config dir
+if [ -z "$BAD_DIR" ]; then
+    BAD_DIR="$(dirname "$CONFIG_DIR")/bad_config"
+fi
+mkdir -p "$BAD_DIR"
+BAD_DIR="$(cd "$BAD_DIR" && pwd)"
+
+# Build image if needed
+if ! docker image inspect amnezia-bridge-failover:local > /dev/null 2>&1; then
+    echo "--- Building image (first run) ---"
+    docker compose -f "$SCRIPT_DIR/docker-compose.yml" build --quiet
+fi
+
+echo "--- Checking configs in: $CONFIG_DIR ---"
+echo "--- Bad configs will move to: $BAD_DIR ---"
+echo ""
+
+docker run --rm \
+    --cap-add NET_ADMIN \
+    --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+    -v "$CONFIG_DIR":/check_config:rw \
+    -v "$BAD_DIR":/bad_config:rw \
+    -e HEALTH_URLS="${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}" \
+    -e FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-8}" \
+    --entrypoint /scripts/proxy-checker.sh \
+    amnezia-bridge-failover:local /check_config

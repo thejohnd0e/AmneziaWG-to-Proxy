@@ -1,0 +1,3 @@
+.env
+config/*.conf
+bad_config/*.conf

@@ -1,0 +1,104 @@
+# AmneziaWG-to-Proxy
+
+Docker-based proxy bridge that routes traffic through your AmneziaWG tunnel.
+Provides SOCKS5 (port 8200) and HTTP (port 9200) proxies with automatic config failover.
+
+## Features
+
+- Automatic detection and switching to the next working config
+- Rejected configs are moved to `bad_config/` and never retried
+- Dual health check endpoints (Google + Cloudflare)
+- Manual proxy checker CLI tool
+- All tunables configurable via `.env`
+
+## Requirements
+
+- Linux with Docker Engine and Docker Compose v2
+- `NET_ADMIN` capability (for WireGuard)
+
+## Quick Start
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/thejohnd0e/AmneziaWG-to-Proxy.git
+cd AmneziaWG-to-Proxy
+
+# 2. Copy example env
+cp .env.example .env
+
+# 3. Place your AmneziaWG config(s) in ./config/
+cp /path/to/your-config.conf ./config/
+
+# 4. Build and start
+docker compose up -d --build
+
+# 5. Check logs
+docker compose logs -f amnezia-proxy
+```
+
+Proxies are available at:
+
+- **SOCKS5:** `localhost:8200`
+- **HTTP:** `localhost:9200`
+
+## How It Works
+
+```
+┌──────────────────────────────────────────────────┐
+│  Docker Container                               │
+│                                                  │
+│  ┌─────────────────┐   ┌──────────────────────┐  │
+│  │ failover-manager │   │ entrypoint           │  │
+│  │                 │   │                      │  │
+│  │ • selects config │   │ • starts proxies     │  │
+│  │ • checks health  │   │ • supervises process │  │
+│  │ • switches on    │   │                      │  │
+│  │   failure        │   │                      │  │
+│  └────────┬────────┘   └──────────────────────┘  │
+│           │                                      │
+│           ▼                                      │
+│  ┌─────────────────┐   ┌──────────────────────┐  │
+│  │ AmneziaWG (wg0) │──▶│ SOCKS5 :1080        │──┼──▶ Host :8200
+│  │                 │──▶│ HTTP/Privoxy :8080   │──┼──▶ Host :9200
+│  └─────────────────┘   └──────────────────────┘  │
+│                                                  │
+│  /configs/*.conf  ← source configs (read)        │
+│  /bad_config/     ← rejected configs (moved)     │
+└──────────────────────────────────────────────────┘
+```
+
+## Config Checker
+
+Manually test configs before deploying:
+
+```bash
+chmod +x proxy-checker
+./proxy-checker ./config
+```
+
+Output:
+
+```
+CONFIG                           STATUS  IP              COUNTRY  CITY     ASN    ORG                LATENCY
+server-01.conf                   OK      203.0.113.20    Germany  Frankfurt AS12345 Example GmbH   42 ms
+server-02.conf                   BAD     -               -        -        -      -                 timeout
+
+Checked: 2 | Working: 1 | Failed: 1
+```
+
+Non-working configs are automatically moved to `bad_config/`.
+
+## Documentation
+
+- [Configuration](docs/CONFIGURATION.md) — all environment variables
+- [Failover](docs/FAILOVER.md) — how automatic switching works
+- [Proxy Checker](docs/PROXY_CHECKER.md) — manual config testing
+- [Troubleshooting](docs/TROUBLESHOOTING.md) — common issues
+- [Security](docs/SECURITY.md) — security considerations
+- [Third Party](docs/THIRD_PARTY.md) — upstream dependencies
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+**Note:** This project uses the upstream `ghcr.io/mainfrezzer/amnezia-bridge` image which has no declared license. See [THIRD_PARTY.md](docs/THIRD_PARTY.md) for details.
