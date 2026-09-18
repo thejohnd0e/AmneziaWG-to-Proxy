@@ -11,6 +11,10 @@ term_handler() {
 
 trap 'term_handler' SIGTERM
 
+# Preserve the Docker gateway before awg-quick installs tunnel policy routes.
+IP4GATEWAY=$(ip route | awk '/default/ { print $3; exit }')
+IP6GATEWAY=$(ip -6 route | awk '/default/ { print $3; exit }')
+
 # Start failover manager in background
 /failover-manager.sh &
 FAILOVER_PID=$!
@@ -36,10 +40,6 @@ done
 
 echo "--- [entrypoint] Active config established, starting proxies ---"
 
-# Grab gateway before adding routes
-IP4GATEWAY=$(ip route | awk '/default/ { print $3 }')
-IP6GATEWAY=$(ip -6 route | awk '/default/ { print $3 }')
-
 # Local network bypass rules (from upstream)
 iptables -I OUTPUT -d 192.168.0.0/16 -j ACCEPT
 iptables -I OUTPUT -d 172.16.0.0/12 -j ACCEPT
@@ -47,6 +47,20 @@ iptables -I OUTPUT -d 10.0.0.0/8 -j ACCEPT
 ip6tables -I OUTPUT -d fc00::/7 -j ACCEPT
 ip6tables -I OUTPUT -d fe80::/10 -j ACCEPT
 ip6tables -I OUTPUT -d ff00::/8 -j ACCEPT
+
+if [ -n "${LAN_NETWORK:-}" ] && [ -n "$IP4GATEWAY" ]; then
+    printf '%s\n' "$LAN_NETWORK" | tr ',' '\n' | while IFS= read -r network; do
+        network=$(echo "$network" | xargs)
+        [ -n "$network" ] && ip route replace "$network" via "$IP4GATEWAY" dev eth0 onlink
+    done
+fi
+
+if [ -n "${LAN_NETWORK6:-}" ] && [ -n "$IP6GATEWAY" ]; then
+    printf '%s\n' "$LAN_NETWORK6" | tr ',' '\n' | while IFS= read -r network; do
+        network=$(echo "$network" | xargs)
+        [ -n "$network" ] && ip -6 route replace "$network" via "$IP6GATEWAY" dev eth0 onlink
+    done
+fi
 
 # Start SOCKS5 proxy
 ./microsocks -q -i :: -p 1080 &
