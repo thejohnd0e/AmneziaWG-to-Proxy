@@ -10,6 +10,7 @@ Provides SOCKS5 (port 8200) and HTTP (port 9200) proxies with automatic config f
 
 ## Features
 
+- Speed-tests all configs at startup and connects to the fastest one
 - Automatic detection and switching to the next working config
 - Rejected configs are moved to `bad_config/` and never retried
 - Dual health check endpoints (Google + Cloudflare)

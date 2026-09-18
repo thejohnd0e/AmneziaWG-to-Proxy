@@ -2,6 +2,10 @@
 # failover-manager.sh — Background failover supervisor
 # Runs inside the container. Manages config selection, health monitoring,
 # and automatic switching to next config on failure.
+#
+# On startup it speed-tests every config, ranks them by latency and connects
+# to the fastest working one. Later failures fall through to the next ranked
+# config, re-ranking only when the list is exhausted.
 
 CONFIG_DIR="${CONFIG_DIR:-/configs}"
 BAD_DIR="${BAD_DIR:-/bad_config}"
@@ -15,10 +19,15 @@ AWG_LOG="${AWG_LOG:-/tmp/awg-quick.log}"
 INTERVAL="${FAILOVER_INTERVAL:-15}"
 FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
 CONFIG_POLL_INTERVAL="${CONFIG_POLL_INTERVAL:-30}"
+HEALTH_TIMEOUT="${FAILOVER_TIMEOUT:-8}"
+SPEED_TEST="${SPEED_TEST:-1}"
+SPEED_TEST_URL="${SPEED_TEST_URL:-}"
+
 # --- Helpers ---
 
+# Logs go to stderr so command substitution only captures real data.
 log() {
-    echo "--- [failover] $(date '+%Y-%m-%d %H:%M:%S') $1 ---"
+    echo "--- [failover] $(date '+%Y-%m-%d %H:%M:%S') $1 ---" >&2
 }
 
 get_configs() {
@@ -49,16 +58,6 @@ move_to_bad() {
     fi
 }
 
-# --- Select next config ---
-
-select_config() {
-    local configs=$(get_configs)
-    if [ -z "$configs" ]; then
-        return 1
-    fi
-    echo "$configs" | head -1
-}
-
 # --- Bring up tunnel with a config ---
 
 start_tunnel() {
@@ -82,14 +81,16 @@ start_tunnel() {
     return 1
 }
 
-check_initial_health() {
+# Retry a health check up to the failure threshold before giving up.
+health_check_with_retries() {
+    local config="$1"
     local attempt=1
 
     while [ "$attempt" -le "$FAIL_THRESHOLD" ]; do
         if "$CHECK_TUNNEL"; then
             return 0
         fi
-        log "Initial health check failed ($attempt / $FAIL_THRESHOLD) for $(basename "$CURRENT_CONFIG")"
+        log "Health check failed ($attempt / $FAIL_THRESHOLD) for $(basename "$config")"
         if [ "$attempt" -lt "$FAIL_THRESHOLD" ]; then
             sleep "$INTERVAL"
         fi
@@ -97,6 +98,71 @@ check_initial_health() {
     done
 
     return 1
+}
+
+# Best round-trip time in milliseconds through wg0 (empty on failure).
+# DNS lookup time is subtracted so configs are ranked by server latency.
+measure_latency() {
+    local url="${SPEED_TEST_URL:-${HEALTH_URLS%%,*}}"
+    [ -n "$url" ] || url="https://connectivitycheck.gstatic.com/generate_204"
+
+    local samples=""
+    local i=1
+    local t val
+    while [ "$i" -le 3 ]; do
+        t=$(curl --interface wg0 --silent --max-time "$HEALTH_TIMEOUT" \
+            -o /dev/null -w '%{time_namelookup} %{time_total}' "$url" 2>/dev/null)
+        val=$(printf '%s\n' "$t" \
+            | awk 'NF == 2 { d = $2 - $1; if (d < 0) d = 0; printf "%.6f", d }')
+        case "$val" in
+            ''|*[!0-9.]*) : ;;
+            *) samples="${samples}${val}\n" ;;
+        esac
+        i=$((i + 1))
+    done
+
+    printf '%b' "$samples" | sort -n | sed -n '1p' | awk '{printf "%.0f", $1 * 1000}'
+}
+
+# Speed-test every config. Prints "latency<TAB>config" lines sorted best-first.
+# Configs that cannot start or pass a health check are quarantined.
+rank_configs() {
+    local configs
+    configs=$(get_configs)
+    [ -n "$configs" ] || return 0
+
+    local results=""
+    local config status ms
+    for config in $configs; do
+        log "Speed test: $(basename "$config")"
+
+        start_tunnel "$config"
+        status=$?
+        if [ "$status" -eq 2 ]; then
+            log "Fatal staging error; leaving $(basename "$config") in $CONFIG_DIR"
+            return 2
+        fi
+        if [ "$status" -ne 0 ]; then
+            log "awg-quick failed for $(basename "$config")"
+            move_to_bad "$config"
+            continue
+        fi
+
+        if ! health_check_with_retries "$config"; then
+            log "No connectivity for $(basename "$config")"
+            awg-quick down wg0 > /dev/null 2>&1
+            move_to_bad "$config"
+            continue
+        fi
+
+        ms=$(measure_latency)
+        log "Speed test: $(basename "$config") = ${ms:-?} ms"
+        results="${results}${ms}\t${config}\n"
+
+        awg-quick down wg0 > /dev/null 2>&1
+    done
+
+    printf '%b' "$results" | sort -n
 }
 
 # --- Main ---
@@ -120,20 +186,36 @@ echo "0" > "$FAILURE_FILE"
 
 log "Failover manager started"
 log "Config dir: $CONFIG_DIR | Bad dir: $BAD_DIR"
-log "Interval: ${INTERVAL}s | Failure threshold: $FAIL_THRESHOLD"
+log "Interval: ${INTERVAL}s | Failure threshold: $FAIL_THRESHOLD | Speed test: $SPEED_TEST"
 
 CURRENT_CONFIG=""
+RANKED=""
 
 while true; do
-    # No active config — find one
+    # No active config — pick the fastest known one.
     if [ -z "$CURRENT_CONFIG" ]; then
-        if ! CURRENT_CONFIG=$(select_config) || [ -z "$CURRENT_CONFIG" ]; then
-            CURRENT_CONFIG=""
-            log "No .conf files found in $CONFIG_DIR"
+        if [ -z "$RANKED" ]; then
+            if [ "$SPEED_TEST" = "1" ]; then
+                log "Ranking configs by latency..."
+                RANKED=$(rank_configs)
+                RANK_STATUS=$?
+                if [ "$RANK_STATUS" -eq 2 ]; then
+                    exit 1
+                fi
+            else
+                RANKED=$(get_configs | sed 's/^/0\t/')
+            fi
+        fi
+
+        if [ -z "$RANKED" ]; then
+            log "No working configs found in $CONFIG_DIR"
             log "Waiting for .conf files in $CONFIG_DIR..."
             sleep "$CONFIG_POLL_INTERVAL"
             continue
         fi
+
+        CURRENT_CONFIG=$(printf '%s\n' "$RANKED" | sed -n '1p' | cut -f2-)
+        RANKED=$(printf '%s\n' "$RANKED" | sed '1d')
 
         log "Trying config: $(basename "$CURRENT_CONFIG")"
         start_tunnel "$CURRENT_CONFIG"
@@ -149,7 +231,7 @@ while true; do
             continue
         fi
 
-        if ! check_initial_health; then
+        if ! health_check_with_retries "$CURRENT_CONFIG"; then
             awg-quick down wg0 > /dev/null 2>&1
             move_to_bad "$CURRENT_CONFIG"
             CURRENT_CONFIG=""

@@ -10,14 +10,14 @@ It continuously monitors the active tunnel and switches to the next config when 
 ## Algorithm
 
 ```
-1. List all *.conf in /configs (sorted by version)
-2. Pick the first file
-3. Copy to wg0.conf
-4. awg-quick up wg0
-5. Initial health check (HTTPS via wg0)
-   → If fail: move to bad_config/, try next
-   → If ok: mark as ACTIVE
-6. Monitoring loop:
+1. Speed-test every *.conf in /configs:
+   a. Copy to wg0.conf, awg-quick up wg0
+   b. Health check (HTTPS via wg0); on failure after retries → bad_config/
+   c. Measure latency (best of 3 probes through wg0)
+   d. awg-quick down wg0
+2. Rank working configs by latency, fastest first
+3. Activate the fastest config and mark it ACTIVE
+4. Monitoring loop:
    a. Sleep FAILOVER_INTERVAL seconds
    b. Run health check (HTTPS via wg0)
    c. If ok: reset failure counter
@@ -25,9 +25,24 @@ It continuously monitors the active tunnel and switches to the next config when 
    e. If counter >= FAILOVER_FAILURES:
       - awg-quick down wg0
       - Move failed config to bad_config/
-      - Pick next config
+      - Pick the next config from the ranked list
+      - If the list is exhausted → re-rank the remaining configs
       - If no configs left → unhealthy, periodic retry
 ```
+
+## Speed Test
+
+At startup the manager measures every config before connecting:
+
+- Each config is brought up and checked for connectivity.
+- Latency is the **best of 3** HTTPS probes through `wg0`, with DNS lookup
+  time subtracted so configs are compared by server latency, not resolver speed.
+- Configs that fail to start or stay unreachable are moved to `bad_config/`.
+- The fastest working config becomes ACTIVE; the rest are kept ranked for failover.
+
+This makes startup slower (roughly a few seconds per config) but selects the
+lowest-latency server. Set `SPEED_TEST=0` to disable ranking and use the
+first config by name instead.
 
 ## Health Check Details
 
@@ -144,5 +159,7 @@ bad_config/server-01.conf
 | `FAILOVER_FAILURES` | `3` | Failures before switching |
 | `FAILOVER_TIMEOUT` | `8` | HTTPS probe timeout |
 | `HEALTH_URLS` | Google + Cloudflare | Health check endpoints |
+| `SPEED_TEST` | `1` | Rank configs by latency at startup |
+| `SPEED_TEST_URL` | first `HEALTH_URLS` entry | URL used for latency probes |
 
 See [CONFIGURATION.md](CONFIGURATION.md) for full details.

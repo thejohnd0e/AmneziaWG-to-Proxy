@@ -48,7 +48,8 @@ make_success_commands() {
 
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$command_dir/awg-quick"
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$command_dir/check-tunnel"
-    chmod +x "$command_dir/awg-quick" "$command_dir/check-tunnel"
+    printf '%s\n' '#!/bin/sh' 'echo "0.001 0.050"' > "$command_dir/curl"
+    chmod +x "$command_dir/awg-quick" "$command_dir/check-tunnel" "$command_dir/curl"
 }
 
 test_missing_wg_directory_is_created() {
@@ -93,7 +94,8 @@ test_empty_config_directory_waits_for_config() {
     mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
     printf '%s\n' '#!/bin/sh' 'printf "%s\n" checked >> "$CHECK_CALLS"' 'exit 0' > "$root/bin/check-tunnel"
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/awg-quick"
-    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel"
+    printf '%s\n' '#!/bin/sh' 'echo "0.001 0.050"' > "$root/bin/curl"
+    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel" "$root/bin/curl"
 
     PATH="$root/bin:$PATH" \
     CONFIG_DIR="$root/configs" \
@@ -170,7 +172,8 @@ test_transient_initial_health_failure_is_retried() {
         'count=$((count + 1))' \
         'echo "$count" > "$CHECK_COUNT"' \
         '[ "$count" -ge 3 ]' > "$root/bin/check-tunnel"
-    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel"
+    printf '%s\n' '#!/bin/sh' 'echo "0.001 0.050"' > "$root/bin/curl"
+    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel" "$root/bin/curl"
 
     PATH="$root/bin:$PATH" \
     CONFIG_DIR="$root/configs" \
@@ -201,6 +204,50 @@ test_transient_initial_health_failure_is_retried() {
     echo "PASS: transient initial health failure is retried"
 }
 
+test_fastest_config_is_selected() {
+    root="$TMP_ROOT/speed-test"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = slow' 'Address = 10.0.0.1/32' \
+        > "$root/configs/slow.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = fast' 'Address = 10.0.0.2/32' \
+        > "$root/configs/fast.conf"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/awg-quick"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/check-tunnel"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'if grep -q "10.0.0.2" "$WG_CONF" 2>/dev/null; then echo "0.001 0.051"; else echo "0.001 0.501"; fi' \
+        > "$root/bin/curl"
+    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel" "$root/bin/curl"
+
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    SPEED_TEST=1 \
+    FAILOVER_INTERVAL=1 \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+
+    wait_for_file "$root/active"
+
+    assert_file_exists "$root/active"
+    grep -q 'fast.conf' "$root/active" \
+        || fail "expected the fastest config to be selected"
+    assert_file_exists "$root/configs/fast.conf"
+    assert_file_exists "$root/configs/slow.conf"
+    assert_no_configs "$root/bad"
+
+    kill "$MANAGER_PID"
+    wait "$MANAGER_PID" 2>/dev/null || true
+    MANAGER_PID=""
+    echo "PASS: fastest config is selected"
+}
+
 test_tun_device_is_created() {
     root="$TMP_ROOT/tun-device"
     mkdir -p "$root/bin"
@@ -217,5 +264,6 @@ test_missing_wg_directory_is_created
 test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
 test_transient_initial_health_failure_is_retried
+test_fastest_config_is_selected
 test_tun_device_is_created
 echo "All failover manager tests passed"
