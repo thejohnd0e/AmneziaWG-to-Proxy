@@ -74,11 +74,14 @@ Proxies are available at:
 
 ## Config Checker
 
-Manually test configs before deploying:
+Manually test configs before deploying. Stop the failover container first —
+the checker brings up its own tunnel with the same WireGuard keys:
 
 ```bash
+docker compose down
 chmod +x proxy-checker
 ./proxy-checker ./config
+docker compose up -d --force-recreate
 ```
 
 Output:

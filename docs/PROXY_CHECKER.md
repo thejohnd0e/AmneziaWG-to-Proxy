@@ -8,6 +8,19 @@ Manual CLI tool for testing AmneziaWG configs before deploying them.
 ./proxy-checker <config_dir> [--bad-dir <bad_config_dir>]
 ```
 
+> **Important:** stop the running container before checking:
+>
+> ```bash
+> docker compose down
+> ./proxy-checker ./config
+> docker compose up -d --force-recreate
+> ```
+>
+> The checker brings up its own `wg0` using the same configs. Running it
+> alongside the automatic failover container makes both tunnels use the same
+> WireGuard keys, so the peer endpoint flaps between them and healthy configs
+> can be misreported as `BAD`.
+
 ## Examples
 
 ```bash
@@ -120,5 +133,13 @@ The image was not found. Run `docker compose build` first, or let the wrapper bu
 
 **Container fails to start**
 The checker needs `NET_ADMIN` capability. The wrapper passes `--cap-add NET_ADMIN` automatically.
+
+**Working configs are reported BAD**
+Stop the failover container first (`docker compose down`). Running both at once
+makes them fight over the same WireGuard keys and endpoint.
+
+**GeoIP shows N/A**
+The external `ipwho.is` lookup failed. The `OK`/`BAD` verdict and the public IP
+are still valid; only country/city/ASN are missing.
 
 See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for more.
