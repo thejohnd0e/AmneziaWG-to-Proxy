@@ -54,7 +54,13 @@ echo "--- Checking configs in: $CONFIG_DIR ---"
 echo "--- Bad configs will move to: $BAD_DIR ---"
 echo ""
 
-docker run --rm \
+# Keep colors when the host terminal supports them.
+DOCKER_TTY=""
+if [ -t 1 ]; then
+    DOCKER_TTY="-t"
+fi
+
+docker run --rm $DOCKER_TTY \
     --cap-add NET_ADMIN \
     --sysctl net.ipv4.conf.all.src_valid_mark=1 \
     --dns "${DNS_PRIMARY:-1.1.1.1}" \
@@ -63,5 +69,7 @@ docker run --rm \
     -v "$BAD_DIR":/bad_config:rw \
     -e HEALTH_URLS="${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}" \
     -e FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-8}" \
+    -e CHECKER_COLOR="${CHECKER_COLOR:-auto}" \
+    -e NO_COLOR="${NO_COLOR:-}" \
     --entrypoint /scripts/proxy-checker.sh \
     amnezia-bridge-failover:local /check_config

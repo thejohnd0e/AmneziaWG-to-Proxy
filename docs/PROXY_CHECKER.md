@@ -118,6 +118,11 @@ The checker respects these from `.env` or the host environment:
 |---|---|
 | `HEALTH_URLS` | Endpoints for health check |
 | `FAILOVER_TIMEOUT` | HTTPS probe timeout |
+| `CHECKER_COLOR` | `auto` (default), `always`, or `never` |
+| `NO_COLOR` | Any non-empty value disables color |
+
+Color is enabled automatically when the output is a terminal and disabled for
+pipes, redirection, and cron. Force it with `CHECKER_COLOR=always`.
 
 ## Troubleshooting
 

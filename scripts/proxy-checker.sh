@@ -8,8 +8,37 @@ BAD_DIR="${3:-../bad_config}"
 TIMEOUT="${FAILOVER_TIMEOUT:-8}"
 HEALTH_URL="${HEALTH_URLS%%,*}"
 
+# Color output: auto (default) enables it only on a TTY, so logs and cron
+# stay clean. Override with CHECKER_COLOR=always|never or NO_COLOR.
+use_color=0
+if [ "${CHECKER_COLOR:-auto}" = "always" ]; then
+    use_color=1
+elif [ "${CHECKER_COLOR:-auto}" = "never" ] || [ -n "${NO_COLOR:-}" ]; then
+    use_color=0
+elif [ -t 1 ]; then
+    use_color=1
+fi
+
+if [ "$use_color" -eq 1 ]; then
+    C_RESET=$(printf '\033[0m')
+    C_BOLD=$(printf '\033[1m')
+    C_DIM=$(printf '\033[2m')
+    C_RED=$(printf '\033[31m')
+    C_GREEN=$(printf '\033[32m')
+    C_YELLOW=$(printf '\033[33m')
+    C_CYAN=$(printf '\033[36m')
+else
+    C_RESET=""
+    C_BOLD=""
+    C_DIM=""
+    C_RED=""
+    C_GREEN=""
+    C_YELLOW=""
+    C_CYAN=""
+fi
+
 if [ -z "$CONFIG_DIR" ] || [ ! -d "$CONFIG_DIR" ]; then
-    echo "ERROR: Directory not found: $CONFIG_DIR"
+    echo "${C_RED}ERROR:${C_RESET} Directory not found: $CONFIG_DIR"
     echo "Usage: ./proxy-checker /path/to/config [--bad-dir /path/to/bad_config]"
     exit 2
 fi
@@ -17,17 +46,17 @@ fi
 WG_CONF="/etc/amnezia/amneziawg/wg0.conf"
 
 if ! mkdir -p "$BAD_DIR" "$(dirname "$WG_CONF")"; then
-    echo "ERROR: Could not create required configuration directories"
+    echo "${C_RED}ERROR:${C_RESET} Could not create required configuration directories"
     exit 2
 fi
 
 if ! command -v awg-quick > /dev/null 2>&1; then
-    echo "ERROR: awg-quick is not installed"
+    echo "${C_RED}ERROR:${C_RESET} awg-quick is not installed"
     exit 2
 fi
 
 if ! /ensure-tun.sh; then
-    echo "ERROR: TUN device setup failed"
+    echo "${C_RED}ERROR:${C_RESET} TUN device setup failed"
     exit 2
 fi
 
@@ -35,7 +64,7 @@ fi
 CONFIGS=$(ls "$CONFIG_DIR"/*.conf 2>/dev/null | grep -v "/wg0.conf$" | sort -V)
 
 if [ -z "$CONFIGS" ]; then
-    echo "ERROR: No .conf files found in $CONFIG_DIR"
+    echo "${C_RED}ERROR:${C_RESET} No .conf files found in $CONFIG_DIR"
     exit 2
 fi
 
@@ -63,12 +92,12 @@ for config_file in $CONFIGS; do
 
     # Copy config
     if ! cp "$config_file" "$WG_CONF"; then
-        echo "ERROR: Could not stage $BASENAME at $WG_CONF"
+        echo "${C_RED}ERROR:${C_RESET} Could not stage $BASENAME at $WG_CONF"
         exit 2
     fi
     if ! sed -i '/^[[:space:]]*DNS[[:space:]]*=/d' "$WG_CONF" \
         || ! chmod 600 "$WG_CONF"; then
-        echo "ERROR: Could not prepare $BASENAME at $WG_CONF"
+        echo "${C_RED}ERROR:${C_RESET} Could not prepare $BASENAME at $WG_CONF"
         exit 2
     fi
 
@@ -81,9 +110,9 @@ for config_file in $CONFIGS; do
     TUNNEL_MS=$(( (END - START) / 1000000 ))
 
     if [ "$AWG_STATUS" -ne 0 ]; then
-        echo "BAD  [awg-quick failed, ${TUNNEL_MS}ms]"
+        printf '%sBAD%s  [awg-quick failed, %sms]\n' "$C_RED" "$C_RESET" "$TUNNEL_MS"
         sed 's/^/  [awg-quick] /' "$AWG_LOG" >&2
-        RESULTS="${RESULTS}${BASENAME}\tBAD\tawg-quick failed\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
+        RESULTS="${RESULTS}${BASENAME}\t${C_RED}BAD${C_RESET}\tawg-quick failed\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
         awg-quick down wg0 > /dev/null 2>&1
         cp "$config_file" "$BAD_DIR/$(basename "$config_file")"
         rm -f "$config_file"
@@ -105,8 +134,8 @@ for config_file in $CONFIGS; do
     IFS="$OLDIFS"
 
     if [ "$HEALTH_OK" -eq 0 ]; then
-        echo "BAD  [tunnel up but no connectivity, ${TUNNEL_MS}ms]"
-        RESULTS="${RESULTS}${BASENAME}\tBAD\tno connectivity\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
+        printf '%sBAD%s  [tunnel up but no connectivity, %sms]\n' "$C_RED" "$C_RESET" "$TUNNEL_MS"
+        RESULTS="${RESULTS}${BASENAME}\t${C_RED}BAD${C_RESET}\tno connectivity\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
         awg-quick down wg0 > /dev/null 2>&1
         cp "$config_file" "$BAD_DIR/$(basename "$config_file")"
         rm -f "$config_file"
@@ -159,8 +188,9 @@ for config_file in $CONFIGS; do
     LATENCY=$(printf "%s\n%s\n%s\n" "$LAT1" "$LAT2" "$LAT3" | sed 's/[^0-9.]//g' | grep -v '^$' | sort -n | sed -n '2p')
     LATENCY_MS=$(echo "$LATENCY" | awk '{printf "%.0f", $1 * 1000}')
 
-    echo "OK   [${LATENCY_MS}ms | ${PUBLIC_IP} | ${COUNTRY}, ${CITY} | ${ASN}]"
-    RESULTS="${RESULTS}${BASENAME}\tOK\t${PUBLIC_IP}\t${COUNTRY}\t${CITY}\t${ASN}\t${ORG}\t${LATENCY_MS}ms\n"
+    printf '%sOK%s   [%sms | %s | %s, %s | %s]\n' \
+        "$C_GREEN" "$C_RESET" "$LATENCY_MS" "$PUBLIC_IP" "$COUNTRY" "$CITY" "$ASN"
+    RESULTS="${RESULTS}${BASENAME}\t${C_GREEN}OK${C_RESET}\t${PUBLIC_IP}\t${COUNTRY}\t${CITY}\t${ASN}\t${ORG}\t${LATENCY_MS}ms\n"
 
     awg-quick down wg0 > /dev/null 2>&1
     WORKING=$((WORKING + 1))
@@ -169,22 +199,28 @@ done
 
 # Summary
 echo ""
-echo "========================================"
-echo " RESULTS"
-echo "========================================"
-printf "CONFIG\t\tSTATUS\tIP\t\tCOUNTRY\tCITY\tASN\tORG\tLATENCY\n"
+printf '%s%s%s\n' "$C_CYAN" "========================================" "$C_RESET"
+printf '%s RESULTS%s\n' "$C_BOLD" "$C_RESET"
+printf '%s%s%s\n' "$C_CYAN" "========================================" "$C_RESET"
+printf '%sCONFIG\t\tSTATUS\tIP\t\tCOUNTRY\tCITY\tASN\tORG\tLATENCY%s\n' "$C_BOLD" "$C_RESET"
 printf '%b' "$RESULTS"
 echo ""
-echo "Checked: $TOTAL | Working: $WORKING | Failed: $FAILED"
+if [ "$FAILED" -gt 0 ]; then
+    printf 'Checked: %s | %sWorking: %s%s | %sFailed: %s%s\n' \
+        "$TOTAL" "$C_GREEN" "$WORKING" "$C_RESET" "$C_RED" "$FAILED" "$C_RESET"
+else
+    printf 'Checked: %s | %sWorking: %s%s | Failed: 0\n' \
+        "$TOTAL" "$C_GREEN" "$WORKING" "$C_RESET"
+fi
 echo ""
 
 if [ "$FAILED" -gt 0 ]; then
-    echo "Moved to bad_config:"
+    printf '%sMoved to bad_config:%s\n' "$C_YELLOW" "$C_RESET"
     ls "$BAD_DIR"/*.conf 2>/dev/null | while read f; do
-        echo "  $(basename "$f")"
+        printf '  %s%s%s\n' "$C_RED" "$(basename "$f")" "$C_RESET"
     done
     echo ""
-    echo "Tip: restore a config by moving it back to $CONFIG_DIR"
+    printf '%sTip: restore a config by moving it back to %s%s\n' "$C_DIM" "$CONFIG_DIR" "$C_RESET"
 fi
 
 if [ "$FAILED" -gt 0 ]; then
