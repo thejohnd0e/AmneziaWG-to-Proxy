@@ -5,6 +5,7 @@ set -u
 TEST_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd)
 PROJECT_DIR=$(dirname "$TEST_DIR")
 MANAGER="$PROJECT_DIR/scripts/failover-manager.sh"
+TUN_SETUP="$PROJECT_DIR/scripts/ensure-tun.sh"
 TMP_ROOT=$(mktemp -d)
 MANAGER_PID=""
 
@@ -54,6 +55,8 @@ test_missing_wg_directory_is_created() {
     FAILURE_FILE="$root/failures" \
     WG_CONF="$root/missing/amneziawg/wg0.conf" \
     CHECK_TUNNEL="$root/bin/check-tunnel" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
     FAILOVER_INTERVAL=1 \
         sh "$MANAGER" > "$root/manager.log" 2>&1 &
     MANAGER_PID=$!
@@ -90,6 +93,8 @@ test_copy_failure_does_not_quarantine_config() {
         FAILURE_FILE="$root/failures" \
         WG_CONF="$root/wg/wg0.conf" \
         CHECK_TUNNEL="$root/bin/check-tunnel" \
+        TUN_SETUP="$TUN_SETUP" \
+        TUN_DEVICE=/dev/null \
             sh "$MANAGER" > "$root/manager.log" 2>&1; then
         fail "manager should fail when the config cannot be staged"
     fi
@@ -101,6 +106,19 @@ test_copy_failure_does_not_quarantine_config() {
     echo "PASS: copy failure does not quarantine config"
 }
 
+test_tun_device_is_created() {
+    root="$TMP_ROOT/tun-device"
+    mkdir -p "$root/bin"
+    printf '%s\n' '#!/bin/sh' ': > "$1"' > "$root/bin/mknod"
+    chmod +x "$root/bin/mknod"
+
+    PATH="$root/bin:$PATH" TUN_DEVICE="$root/dev/net/tun" sh "$TUN_SETUP" \
+        || fail "TUN setup should create a missing device"
+    [ -e "$root/dev/net/tun" ] || fail "expected TUN device to be created"
+    echo "PASS: missing TUN device is created"
+}
+
 test_missing_wg_directory_is_created
 test_copy_failure_does_not_quarantine_config
+test_tun_device_is_created
 echo "All failover manager tests passed"

@@ -26,6 +26,11 @@ if ! command -v awg-quick > /dev/null 2>&1; then
     exit 2
 fi
 
+if ! /ensure-tun.sh; then
+    echo "ERROR: TUN device setup failed"
+    exit 2
+fi
+
 # Collect configs
 CONFIGS=$(ls "$CONFIG_DIR"/*.conf 2>/dev/null | grep -v "/wg0.conf$" | sort -V)
 
@@ -52,13 +57,15 @@ for config_file in $CONFIGS; do
 
     # Bring up tunnel
     START=$(date +%s%N)
-    awg-quick up wg0 > /dev/null 2>&1
+    AWG_LOG="/tmp/awg-quick.log"
+    awg-quick up wg0 > "$AWG_LOG" 2>&1
     AWG_STATUS=$?
     END=$(date +%s%N)
     TUNNEL_MS=$(( (END - START) / 1000000 ))
 
     if [ "$AWG_STATUS" -ne 0 ]; then
         echo "BAD  [awg-quick failed, ${TUNNEL_MS}ms]"
+        sed 's/^/  [awg-quick] /' "$AWG_LOG" >&2
         RESULTS="${RESULTS}${BASENAME}\tBAD\tawg-quick failed\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
         awg-quick down wg0 > /dev/null 2>&1
         cp "$config_file" "$BAD_DIR/$(basename "$config_file")"

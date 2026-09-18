@@ -9,6 +9,8 @@ ACTIVE_MARKER="${ACTIVE_MARKER:-/tmp/active_config}"
 FAILURE_FILE="${FAILURE_FILE:-/tmp/failure_count}"
 WG_CONF="${WG_CONF:-/etc/amnezia/amneziawg/wg0.conf}"
 CHECK_TUNNEL="${CHECK_TUNNEL:-/check-tunnel.sh}"
+TUN_SETUP="${TUN_SETUP:-/ensure-tun.sh}"
+AWG_LOG="${AWG_LOG:-/tmp/awg-quick.log}"
 
 INTERVAL="${FAILOVER_INTERVAL:-15}"
 FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
@@ -65,8 +67,13 @@ start_tunnel() {
         log "ERROR: Could not stage $(basename "$config_file") at $WG_CONF"
         return 2
     fi
-    awg-quick up wg0 > /dev/null 2>&1
-    return $?
+    if awg-quick up wg0 > "$AWG_LOG" 2>&1; then
+        return 0
+    fi
+
+    log "awg-quick diagnostic output follows"
+    sed 's/^/--- [awg-quick] /' "$AWG_LOG" >&2
+    return 1
 }
 
 # --- Main ---
@@ -78,6 +85,11 @@ fi
 
 if ! command -v awg-quick > /dev/null 2>&1; then
     log "ERROR: awg-quick is not installed"
+    exit 1
+fi
+
+if ! "$TUN_SETUP"; then
+    log "ERROR: TUN device setup failed"
     exit 1
 fi
 
