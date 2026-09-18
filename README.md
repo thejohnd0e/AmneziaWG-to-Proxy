@@ -1,5 +1,10 @@
 # AmneziaWG-to-Proxy
 
+[![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Docker Compose](https://img.shields.io/badge/Docker%20Compose-v2-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![Shell](https://img.shields.io/badge/Shell-POSIX%20sh-4EAA25?logo=gnu-bash&logoColor=white)](scripts/)
+[![Last Commit](https://img.shields.io/github/last-commit/thejohnd0e/AmneziaWG-to-Proxy)](https://github.com/thejohnd0e/AmneziaWG-to-Proxy/commits/master)
+
 Docker-based proxy bridge that routes traffic through your AmneziaWG tunnel.
 Provides SOCKS5 (port 8200) and HTTP (port 9200) proxies with automatic config failover.
 
