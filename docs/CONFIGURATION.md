@@ -9,6 +9,8 @@ All settings are controlled via environment variables in `.env`.
 | `FAILOVER_INTERVAL` | `15` | Seconds between health checks |
 | `FAILOVER_FAILURES` | `3` | Consecutive failures before switching config |
 | `FAILOVER_TIMEOUT` | `8` | Max seconds per HTTPS probe |
+| `SPEED_TEST` | `1` | Speed-test configs at startup and connect to the fastest |
+| `SPEED_TEST_URL` | *(first `HEALTH_URLS` entry)* | URL used for latency probes |
 
 ## Health Check
 
@@ -16,6 +18,17 @@ All settings are controlled via environment variables in `.env`.
 |---|---|---|
 | `HEALTH_URLS` | `https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204` | Comma-separated HTTPS URLs for tunnel health check |
 | `HEALTH_URL_CHECK` | *(empty)* | Override for upstream healthcheck ping target |
+
+## DNS
+
+| Variable | Default | Description |
+|---|---|---|
+| `DNS_PRIMARY` | `1.1.1.1` | Primary resolver used inside the container |
+| `DNS_SECONDARY` | `1.0.0.1` | Secondary resolver |
+
+Public resolvers are used because a host or router DNS may sinkhole domains to
+unreachable addresses (e.g. `198.18.0.0/15`), which makes the proxy time out.
+The same resolvers are used by the config checker.
 
 ## Proxy Settings
 
@@ -44,6 +57,9 @@ All settings are controlled via environment variables in `.env`.
 FAILOVER_INTERVAL=15
 FAILOVER_FAILURES=3
 FAILOVER_TIMEOUT=8
+SPEED_TEST=1
+DNS_PRIMARY=1.1.1.1
+DNS_SECONDARY=1.0.0.1
 PROXY_BIND_ADDRESS=127.0.0.1
 LAN_NETWORK=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
 ```

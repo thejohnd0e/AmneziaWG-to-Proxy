@@ -56,7 +56,7 @@ Proxies are available at:
 │  ┌─────────────────┐   ┌──────────────────────┐  │
 │  │ failover-manager │   │ entrypoint           │  │
 │  │                 │   │                      │  │
-│  │ • selects config │   │ • starts proxies     │  │
+│  │ • picks fastest  │   │ • starts proxies     │  │
 │  │ • checks health  │   │ • supervises process │  │
 │  │ • switches on    │   │                      │  │
 │  │   failure        │   │                      │  │
@@ -72,6 +72,21 @@ Proxies are available at:
 │  /bad_config/     ← rejected configs (moved)     │
 └──────────────────────────────────────────────────┘
 ```
+
+## Fastest Server Selection
+
+On startup the failover manager speed-tests every config before connecting:
+
+1. Bring up the tunnel with the config.
+2. Verify connectivity (HTTPS through `wg0`).
+3. Measure latency — best of 3 probes, DNS lookup excluded.
+4. Tear the tunnel down.
+
+Working configs are ranked by latency, and the fastest one becomes active.
+Configs that fail to start or stay unreachable are moved to `bad_config/`.
+The ranked list is reused for later failovers and rebuilt when exhausted.
+
+Disable it with `SPEED_TEST=0` to use the first config by name instead.
 
 ## Config Checker
 
