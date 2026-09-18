@@ -159,6 +159,48 @@ test_copy_failure_does_not_quarantine_config() {
     echo "PASS: copy failure does not quarantine config"
 }
 
+test_transient_initial_health_failure_is_retried() {
+    root="$TMP_ROOT/transient-health"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = test' > "$root/configs/working.conf"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/awg-quick"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'count=$(cat "$CHECK_COUNT" 2>/dev/null || echo 0)' \
+        'count=$((count + 1))' \
+        'echo "$count" > "$CHECK_COUNT"' \
+        '[ "$count" -ge 3 ]' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel"
+
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    CHECK_COUNT="$root/check-count" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    FAILOVER_FAILURES=3 \
+    FAILOVER_INTERVAL=0.1 \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+
+    wait_for_file "$root/active"
+
+    assert_file_exists "$root/active"
+    assert_file_exists "$root/configs/working.conf"
+    assert_no_configs "$root/bad"
+    [ "$(cat "$root/check-count")" -ge 3 ] \
+        || fail "expected initial health check to be retried"
+
+    kill "$MANAGER_PID"
+    wait "$MANAGER_PID" 2>/dev/null || true
+    MANAGER_PID=""
+    echo "PASS: transient initial health failure is retried"
+}
+
 test_tun_device_is_created() {
     root="$TMP_ROOT/tun-device"
     mkdir -p "$root/bin"
@@ -174,5 +216,6 @@ test_tun_device_is_created() {
 test_missing_wg_directory_is_created
 test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
+test_transient_initial_health_failure_is_retried
 test_tun_device_is_created
 echo "All failover manager tests passed"

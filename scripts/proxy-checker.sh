@@ -54,6 +54,11 @@ for config_file in $CONFIGS; do
         echo "ERROR: Could not stage $BASENAME at $WG_CONF"
         exit 2
     fi
+    if ! sed -i '/^[[:space:]]*DNS[[:space:]]*=/d' "$WG_CONF" \
+        || ! chmod 600 "$WG_CONF"; then
+        echo "ERROR: Could not prepare $BASENAME at $WG_CONF"
+        exit 2
+    fi
 
     # Bring up tunnel
     START=$(date +%s%N)

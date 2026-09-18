@@ -82,6 +82,23 @@ start_tunnel() {
     return 1
 }
 
+check_initial_health() {
+    local attempt=1
+
+    while [ "$attempt" -le "$FAIL_THRESHOLD" ]; do
+        if "$CHECK_TUNNEL"; then
+            return 0
+        fi
+        log "Initial health check failed ($attempt / $FAIL_THRESHOLD) for $(basename "$CURRENT_CONFIG")"
+        if [ "$attempt" -lt "$FAIL_THRESHOLD" ]; then
+            sleep "$INTERVAL"
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
+
 # --- Main ---
 
 if ! mkdir -p "$BAD_DIR" "$(dirname "$WG_CONF")"; then
@@ -132,10 +149,7 @@ while true; do
             continue
         fi
 
-        # Initial health check
-        "$CHECK_TUNNEL"
-        if [ $? -ne 0 ]; then
-            log "Initial health check failed for $(basename "$CURRENT_CONFIG")"
+        if ! check_initial_health; then
             awg-quick down wg0 > /dev/null 2>&1
             move_to_bad "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
