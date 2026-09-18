@@ -85,7 +85,9 @@ json_num() {
 TOTAL=0
 WORKING=0
 FAILED=0
-RESULTS=""
+# Working rows are prefixed with the latency (ms) so the summary can sort them.
+OK_RESULTS=""
+BAD_RESULTS=""
 
 for config_file in $CONFIGS; do
     TOTAL=$((TOTAL + 1))
@@ -114,7 +116,7 @@ for config_file in $CONFIGS; do
     if [ "$AWG_STATUS" -ne 0 ]; then
         printf '%sBAD%s  [awg-quick failed, %sms]\n' "$C_RED" "$C_RESET" "$TUNNEL_MS"
         sed 's/^/  [awg-quick] /' "$AWG_LOG" >&2
-        RESULTS="${RESULTS}${BASENAME}\t${C_RED}BAD${C_RESET}\tawg-quick failed\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
+        BAD_RESULTS="${BAD_RESULTS}${BASENAME}\t${C_RED}BAD${C_RESET}\tawg-quick failed\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
         awg-quick down wg0 > /dev/null 2>&1
         cp "$config_file" "$BAD_DIR/$(basename "$config_file")"
         rm -f "$config_file"
@@ -137,7 +139,7 @@ for config_file in $CONFIGS; do
 
     if [ "$HEALTH_OK" -eq 0 ]; then
         printf '%sBAD%s  [tunnel up but no connectivity, %sms]\n' "$C_RED" "$C_RESET" "$TUNNEL_MS"
-        RESULTS="${RESULTS}${BASENAME}\t${C_RED}BAD${C_RESET}\tno connectivity\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
+        BAD_RESULTS="${BAD_RESULTS}${BASENAME}\t${C_RED}BAD${C_RESET}\tno connectivity\t-\t-\t-\t-\t${TUNNEL_MS}ms\n"
         awg-quick down wg0 > /dev/null 2>&1
         cp "$config_file" "$BAD_DIR/$(basename "$config_file")"
         rm -f "$config_file"
@@ -195,7 +197,7 @@ for config_file in $CONFIGS; do
         "$C_MAGENTA" "$COUNTRY" "$C_RESET" \
         "$C_CYAN" "$CITY" "$C_RESET" \
         "$ASN"
-    RESULTS="${RESULTS}${BASENAME}\t${C_GREEN}OK${C_RESET}\t${PUBLIC_IP}\t${C_MAGENTA}${COUNTRY}${C_RESET}\t${C_CYAN}${CITY}${C_RESET}\t${ASN}\t${ORG}\t${LATENCY_MS}ms\n"
+    OK_RESULTS="${OK_RESULTS}${LATENCY_MS}\t${BASENAME}\t${C_GREEN}OK${C_RESET}\t${PUBLIC_IP}\t${C_MAGENTA}${COUNTRY}${C_RESET}\t${C_CYAN}${CITY}${C_RESET}\t${ASN}\t${ORG}\t${LATENCY_MS}ms\n"
 
     awg-quick down wg0 > /dev/null 2>&1
     WORKING=$((WORKING + 1))
@@ -208,7 +210,9 @@ printf '%s%s%s\n' "$C_CYAN" "========================================" "$C_RESET
 printf '%s RESULTS%s\n' "$C_BOLD" "$C_RESET"
 printf '%s%s%s\n' "$C_CYAN" "========================================" "$C_RESET"
 printf '%sCONFIG\t\tSTATUS\tIP\t\tCOUNTRY\tCITY\tASN\tORG\tLATENCY%s\n' "$C_BOLD" "$C_RESET"
-printf '%b' "$RESULTS"
+# Working configs sorted by latency (best first), then rejected ones.
+printf '%b' "$OK_RESULTS" | sort -n | cut -f2-
+printf '%b' "$BAD_RESULTS"
 echo ""
 if [ "$FAILED" -gt 0 ]; then
     printf 'Checked: %s | %sWorking: %s%s | %sFailed: %s%s\n' \
