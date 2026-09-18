@@ -39,6 +39,18 @@ if [ -z "$CONFIGS" ]; then
     exit 2
 fi
 
+# Extract a string or numeric JSON field, tolerating whitespace after the colon.
+json_str() {
+    printf '%s' "$1" | tr -d '\n' \
+        | grep -o "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+        | head -1 | sed 's/^[^:]*:[[:space:]]*"//; s/"$//'
+}
+json_num() {
+    printf '%s' "$1" | tr -d '\n' \
+        | grep -o "\"$2\"[[:space:]]*:[[:space:]]*[0-9][0-9]*" \
+        | head -1 | sed 's/^[^:]*:[[:space:]]*//'
+}
+
 TOTAL=0
 WORKING=0
 FAILED=0
@@ -105,21 +117,38 @@ for config_file in $CONFIGS; do
     # Get public IP and GeoIP info
     # The checker runs without the production proxy; the active wg0 tunnel
     # provides the egress path for these requests.
-    GEO=$(curl --interface wg0 --silent --max-time 10 "https://ipwho.is/" 2>/dev/null)
-    PUBLIC_IP=$(echo "$GEO" | grep -o '"ip":"[^"]*"' | head -1 | cut -d'"' -f4)
-    COUNTRY=$(echo "$GEO" | grep -o '"country":"[^"]*"' | head -1 | cut -d'"' -f4)
-    CITY=$(echo "$GEO" | grep -o '"city":"[^"]*"' | head -1 | cut -d'"' -f4)
-    ASN=$(echo "$GEO" | grep -o '"asn":"[^"]*"' | head -1 | cut -d'"' -f4)
-    ORG=$(echo "$GEO" | grep -o '"org":"[^"]*"' | head -1 | cut -d'"' -f4)
+    GEO=$(curl -4 --interface wg0 --silent --max-time 10 "https://ipwho.is/" 2>/dev/null)
+    PUBLIC_IP=$(json_str "$GEO" ip)
+    COUNTRY=$(json_str "$GEO" country)
+    CITY=$(json_str "$GEO" city)
+    ASN_NUM=$(json_num "$GEO" asn)
+    [ -n "$ASN_NUM" ] && ASN="AS${ASN_NUM}"
+    ORG=$(json_str "$GEO" org)
 
-    # Fallback if ipwho.is fails
+    # Fallback provider
     if [ -z "$PUBLIC_IP" ]; then
-        PUBLIC_IP=$(curl --interface wg0 --silent --max-time 10 "https://api.ipify.org?format=json" 2>/dev/null | grep -o '"ip":"[^"]*"' | cut -d'"' -f4)
+        GEO=$(curl -4 --interface wg0 --silent --max-time 10 "http://ip-api.com/json/" 2>/dev/null)
+        PUBLIC_IP=$(json_str "$GEO" query)
+        COUNTRY=$(json_str "$GEO" country)
+        CITY=$(json_str "$GEO" city)
+        ASN=$(json_str "$GEO" as)
+        ORG=$(json_str "$GEO" org)
+    fi
+
+    # Last resort: IP only
+    if [ -z "$PUBLIC_IP" ]; then
+        IPJSON=$(curl -4 --interface wg0 --silent --max-time 10 "https://api.ipify.org?format=json" 2>/dev/null)
+        PUBLIC_IP=$(json_str "$IPJSON" ip)
         COUNTRY="N/A"
         CITY="N/A"
         ASN="N/A"
         ORG="N/A"
     fi
+
+    [ -n "$COUNTRY" ] || COUNTRY="N/A"
+    [ -n "$CITY" ] || CITY="N/A"
+    [ -n "$ASN" ] || ASN="N/A"
+    [ -n "$ORG" ] || ORG="N/A"
 
     # Measure latency (3 probes, median)
     LAT1=$(curl --interface wg0 --silent --max-time "$TIMEOUT" -o /dev/null -w "%{time_total}" "https://connectivitycheck.gstatic.com/generate_204" 2>/dev/null)
@@ -144,9 +173,7 @@ echo "========================================"
 echo " RESULTS"
 echo "========================================"
 printf "CONFIG\t\tSTATUS\tIP\t\tCOUNTRY\tCITY\tASN\tORG\tLATENCY\n"
-echo "$RESULTS" | while IFS= read -r line; do
-    [ -n "$line" ] && printf "%s\n" "$line"
-done
+printf '%b' "$RESULTS"
 echo ""
 echo "Checked: $TOTAL | Working: $WORKING | Failed: $FAILED"
 echo ""
