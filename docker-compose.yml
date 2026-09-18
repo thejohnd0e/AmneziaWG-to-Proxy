@@ -20,6 +20,11 @@ services:
       - NET_ADMIN
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
+    # Resolve names through a clean resolver instead of the host/router DNS,
+    # which may sinkhole domains to unreachable 198.18.0.0/15 addresses.
+    dns:
+      - ${DNS_PRIMARY:-1.1.1.1}
+      - ${DNS_SECONDARY:-1.0.0.1}
     volumes:
       - ./config:/configs
       - ./bad_config:/bad_config
