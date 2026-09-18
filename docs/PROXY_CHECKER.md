@@ -8,18 +8,17 @@ Manual CLI tool for testing AmneziaWG configs before deploying them.
 ./proxy-checker <config_dir> [--bad-dir <bad_config_dir>]
 ```
 
-> **Important:** stop the running container before checking:
+> **Note:** The checker starts its own `wg0`, so it can run while the failover
+> container is up. If a checked config uses the same WireGuard private key as
+> the currently active one, both tunnels compete for the WARP session — this can
+> briefly interrupt the live proxy and occasionally produce false `BAD` results.
+> For a guaranteed-clean check (or when in doubt), stop the container first:
 >
 > ```bash
 > docker compose down
 > ./proxy-checker ./config
 > docker compose up -d --force-recreate
 > ```
->
-> The checker brings up its own `wg0` using the same configs. Running it
-> alongside the automatic failover container makes both tunnels use the same
-> WireGuard keys, so the peer endpoint flaps between them and healthy configs
-> can be misreported as `BAD`.
 
 ## Examples
 
@@ -135,8 +134,10 @@ The image was not found. Run `docker compose build` first, or let the wrapper bu
 The checker needs `NET_ADMIN` capability. The wrapper passes `--cap-add NET_ADMIN` automatically.
 
 **Working configs are reported BAD**
-Stop the failover container first (`docker compose down`). Running both at once
-makes them fight over the same WireGuard keys and endpoint.
+If the failover container is running, a checked config that shares its active
+WireGuard key competes for the WARP session and may be misreported. Re-run with
+the container stopped (`docker compose down`), or check configs that use a
+different key.
 
 **GeoIP shows N/A**
 The external `ipwho.is` lookup failed. The `OK`/`BAD` verdict and the public IP
