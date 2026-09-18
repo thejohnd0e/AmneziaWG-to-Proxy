@@ -57,6 +57,8 @@ echo ""
 docker run --rm \
     --cap-add NET_ADMIN \
     --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+    --dns "${DNS_PRIMARY:-1.1.1.1}" \
+    --dns "${DNS_SECONDARY:-1.0.0.1}" \
     -v "$CONFIG_DIR":/check_config:rw \
     -v "$BAD_DIR":/bad_config:rw \
     -e HEALTH_URLS="${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}" \
