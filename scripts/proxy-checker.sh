@@ -26,6 +26,7 @@ if [ "$use_color" -eq 1 ]; then
     C_RED=$(printf '\033[31m')
     C_GREEN=$(printf '\033[32m')
     C_YELLOW=$(printf '\033[33m')
+    C_MAGENTA=$(printf '\033[35m')
     C_CYAN=$(printf '\033[36m')
 else
     C_RESET=""
@@ -34,6 +35,7 @@ else
     C_RED=""
     C_GREEN=""
     C_YELLOW=""
+    C_MAGENTA=""
     C_CYAN=""
 fi
 
@@ -188,9 +190,12 @@ for config_file in $CONFIGS; do
     LATENCY=$(printf "%s\n%s\n%s\n" "$LAT1" "$LAT2" "$LAT3" | sed 's/[^0-9.]//g' | grep -v '^$' | sort -n | sed -n '2p')
     LATENCY_MS=$(echo "$LATENCY" | awk '{printf "%.0f", $1 * 1000}')
 
-    printf '%sOK%s   [%sms | %s | %s, %s | %s]\n' \
-        "$C_GREEN" "$C_RESET" "$LATENCY_MS" "$PUBLIC_IP" "$COUNTRY" "$CITY" "$ASN"
-    RESULTS="${RESULTS}${BASENAME}\t${C_GREEN}OK${C_RESET}\t${PUBLIC_IP}\t${COUNTRY}\t${CITY}\t${ASN}\t${ORG}\t${LATENCY_MS}ms\n"
+    printf '%sOK%s   [%sms | %s | %s%s%s, %s%s%s | %s]\n' \
+        "$C_GREEN" "$C_RESET" "$LATENCY_MS" "$PUBLIC_IP" \
+        "$C_MAGENTA" "$COUNTRY" "$C_RESET" \
+        "$C_CYAN" "$CITY" "$C_RESET" \
+        "$ASN"
+    RESULTS="${RESULTS}${BASENAME}\t${C_GREEN}OK${C_RESET}\t${PUBLIC_IP}\t${C_MAGENTA}${COUNTRY}${C_RESET}\t${C_CYAN}${CITY}${C_RESET}\t${ASN}\t${ORG}\t${LATENCY_MS}ms\n"
 
     awg-quick down wg0 > /dev/null 2>&1
     WORKING=$((WORKING + 1))
