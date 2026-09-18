@@ -3,11 +3,12 @@
 # Runs inside the container. Manages config selection, health monitoring,
 # and automatic switching to next config on failure.
 
-CONFIG_DIR="/configs"
-BAD_DIR="/bad_config"
-ACTIVE_MARKER="/tmp/active_config"
-FAILURE_FILE="/tmp/failure_count"
-WG_CONF="/etc/amnezia/amneziawg/wg0.conf"
+CONFIG_DIR="${CONFIG_DIR:-/configs}"
+BAD_DIR="${BAD_DIR:-/bad_config}"
+ACTIVE_MARKER="${ACTIVE_MARKER:-/tmp/active_config}"
+FAILURE_FILE="${FAILURE_FILE:-/tmp/failure_count}"
+WG_CONF="${WG_CONF:-/etc/amnezia/amneziawg/wg0.conf}"
+CHECK_TUNNEL="${CHECK_TUNNEL:-/check-tunnel.sh}"
 
 INTERVAL="${FAILOVER_INTERVAL:-15}"
 FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
@@ -60,14 +61,26 @@ select_config() {
 
 start_tunnel() {
     local config_file="$1"
-    cp "$config_file" "$WG_CONF"
+    if ! cp "$config_file" "$WG_CONF"; then
+        log "ERROR: Could not stage $(basename "$config_file") at $WG_CONF"
+        return 2
+    fi
     awg-quick up wg0 > /dev/null 2>&1
     return $?
 }
 
 # --- Main ---
 
-mkdir -p "$BAD_DIR"
+if ! mkdir -p "$BAD_DIR" "$(dirname "$WG_CONF")"; then
+    log "ERROR: Could not create required configuration directories"
+    exit 1
+fi
+
+if ! command -v awg-quick > /dev/null 2>&1; then
+    log "ERROR: awg-quick is not installed"
+    exit 1
+fi
+
 echo "0" > "$FAILURE_FILE"
 
 log "Failover manager started"
@@ -88,7 +101,12 @@ while true; do
 
         log "Trying config: $(basename "$CURRENT_CONFIG")"
         start_tunnel "$CURRENT_CONFIG"
-        if [ $? -ne 0 ]; then
+        START_STATUS=$?
+        if [ "$START_STATUS" -eq 2 ]; then
+            log "Fatal staging error; leaving $(basename "$CURRENT_CONFIG") in $CONFIG_DIR"
+            exit 1
+        fi
+        if [ "$START_STATUS" -ne 0 ]; then
             log "awg-quick failed for $(basename "$CURRENT_CONFIG")"
             move_to_bad "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
@@ -96,7 +114,7 @@ while true; do
         fi
 
         # Initial health check
-        /check-tunnel.sh
+        "$CHECK_TUNNEL"
         if [ $? -ne 0 ]; then
             log "Initial health check failed for $(basename "$CURRENT_CONFIG")"
             awg-quick down wg0 > /dev/null 2>&1
@@ -113,7 +131,7 @@ while true; do
     # Monitoring loop
     sleep "$INTERVAL"
 
-    /check-tunnel.sh
+    "$CHECK_TUNNEL"
     if [ $? -eq 0 ]; then
         echo "0" > "$FAILURE_FILE"
         continue

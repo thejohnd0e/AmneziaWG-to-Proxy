@@ -19,6 +19,12 @@ FAILOVER_PID=$!
 echo "--- [entrypoint] Waiting for first active config ---"
 WAIT_COUNT=0
 while [ ! -f /tmp/active_config ]; do
+    if ! kill -0 "$FAILOVER_PID" 2>/dev/null; then
+        wait "$FAILOVER_PID"
+        FAILOVER_STATUS=$?
+        echo "--- [entrypoint] Failover manager exited with status $FAILOVER_STATUS ---"
+        exit "$FAILOVER_STATUS"
+    fi
     sleep 5
     WAIT_COUNT=$((WAIT_COUNT + 1))
     if [ "$WAIT_COUNT" -ge 120 ]; then

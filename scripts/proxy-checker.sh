@@ -14,7 +14,17 @@ if [ -z "$CONFIG_DIR" ] || [ ! -d "$CONFIG_DIR" ]; then
     exit 2
 fi
 
-mkdir -p "$BAD_DIR"
+WG_CONF="/etc/amnezia/amneziawg/wg0.conf"
+
+if ! mkdir -p "$BAD_DIR" "$(dirname "$WG_CONF")"; then
+    echo "ERROR: Could not create required configuration directories"
+    exit 2
+fi
+
+if ! command -v awg-quick > /dev/null 2>&1; then
+    echo "ERROR: awg-quick is not installed"
+    exit 2
+fi
 
 # Collect configs
 CONFIGS=$(ls "$CONFIG_DIR"/*.conf 2>/dev/null | grep -v "/wg0.conf$" | sort -V)
@@ -32,12 +42,13 @@ RESULTS=""
 for config_file in $CONFIGS; do
     TOTAL=$((TOTAL + 1))
     BASENAME=$(basename "$config_file")
-    WG_CONF="/etc/amnezia/amneziawg/wg0.conf"
-
     printf "Checking %-30s ... " "$BASENAME"
 
     # Copy config
-    cp "$config_file" "$WG_CONF"
+    if ! cp "$config_file" "$WG_CONF"; then
+        echo "ERROR: Could not stage $BASENAME at $WG_CONF"
+        exit 2
+    fi
 
     # Bring up tunnel
     START=$(date +%s%N)
