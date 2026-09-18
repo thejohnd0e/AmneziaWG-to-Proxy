@@ -33,6 +33,15 @@ assert_no_configs() {
     fi
 }
 
+wait_for_file() {
+    file="$1"
+    attempts=0
+    while [ ! -f "$file" ] && [ "$attempts" -lt 50 ]; do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+}
+
 make_success_commands() {
     command_dir="$1"
     mkdir -p "$command_dir"
@@ -45,7 +54,7 @@ make_success_commands() {
 test_missing_wg_directory_is_created() {
     root="$TMP_ROOT/create-directory"
     mkdir -p "$root/configs" "$root/bad"
-    printf '%s\n' '[Interface]' 'PrivateKey = test' > "$root/configs/working.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = test' 'DNS = 1.1.1.1' > "$root/configs/working.conf"
     make_success_commands "$root/bin"
 
     PATH="$root/bin:$PATH" \
@@ -61,21 +70,65 @@ test_missing_wg_directory_is_created() {
         sh "$MANAGER" > "$root/manager.log" 2>&1 &
     MANAGER_PID=$!
 
-    attempts=0
-    while [ ! -f "$root/active" ] && [ "$attempts" -lt 50 ]; do
-        sleep 0.1
-        attempts=$((attempts + 1))
-    done
+    wait_for_file "$root/active"
 
     assert_file_exists "$root/active"
     assert_file_exists "$root/missing/amneziawg/wg0.conf"
     assert_file_exists "$root/configs/working.conf"
     assert_no_configs "$root/bad"
+    grep -q '^DNS = 1.1.1.1$' "$root/configs/working.conf" \
+        || fail "source config DNS directive should remain unchanged"
+    if grep -q '^[[:space:]]*DNS[[:space:]]*=' "$root/missing/amneziawg/wg0.conf"; then
+        fail "staged config should not contain a DNS directive"
+    fi
 
     kill "$MANAGER_PID"
     wait "$MANAGER_PID" 2>/dev/null || true
     MANAGER_PID=""
     echo "PASS: missing WireGuard directory is created"
+}
+
+test_empty_config_directory_waits_for_config() {
+    root="$TMP_ROOT/empty-directory"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '#!/bin/sh' 'printf "%s\n" checked >> "$CHECK_CALLS"' 'exit 0' > "$root/bin/check-tunnel"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/awg-quick"
+    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel"
+
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    CHECK_CALLS="$root/check-calls" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    CONFIG_POLL_INTERVAL=0.1 \
+    FAILOVER_INTERVAL=1 \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+
+    sleep 0.3
+    [ ! -e "$root/check-calls" ] \
+        || fail "health check should not run without a selected config"
+    assert_no_configs "$root/bad"
+
+    printf '%s\n' '[Interface]' 'PrivateKey = test' > "$root/configs/working.conf"
+    wait_for_file "$root/active"
+
+    assert_file_exists "$root/active"
+    assert_file_exists "$root/configs/working.conf"
+    assert_no_configs "$root/bad"
+    if grep -qE 'basename:|cp: .*option|Failed to move' "$root/manager.log"; then
+        fail "empty config directory was treated as a config path"
+    fi
+
+    kill "$MANAGER_PID"
+    wait "$MANAGER_PID" 2>/dev/null || true
+    MANAGER_PID=""
+    echo "PASS: empty config directory waits for a real config"
 }
 
 test_copy_failure_does_not_quarantine_config() {
@@ -119,6 +172,7 @@ test_tun_device_is_created() {
 }
 
 test_missing_wg_directory_is_created
+test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
 test_tun_device_is_created
 echo "All failover manager tests passed"

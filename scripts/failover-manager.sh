@@ -14,6 +14,7 @@ AWG_LOG="${AWG_LOG:-/tmp/awg-quick.log}"
 
 INTERVAL="${FAILOVER_INTERVAL:-15}"
 FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
+CONFIG_POLL_INTERVAL="${CONFIG_POLL_INTERVAL:-30}"
 # --- Helpers ---
 
 log() {
@@ -53,7 +54,6 @@ move_to_bad() {
 select_config() {
     local configs=$(get_configs)
     if [ -z "$configs" ]; then
-        log "No .conf files found in $CONFIG_DIR"
         return 1
     fi
     echo "$configs" | head -1
@@ -65,6 +65,12 @@ start_tunnel() {
     local config_file="$1"
     if ! cp "$config_file" "$WG_CONF"; then
         log "ERROR: Could not stage $(basename "$config_file") at $WG_CONF"
+        return 2
+    fi
+    # Docker owns /etc/resolv.conf, so wg-quick must not invoke resolvconf.
+    if ! sed -i '/^[[:space:]]*DNS[[:space:]]*=/d' "$WG_CONF" \
+        || ! chmod 600 "$WG_CONF"; then
+        log "ERROR: Could not prepare $(basename "$config_file") at $WG_CONF"
         return 2
     fi
     if awg-quick up wg0 > "$AWG_LOG" 2>&1; then
@@ -104,10 +110,11 @@ CURRENT_CONFIG=""
 while true; do
     # No active config — find one
     if [ -z "$CURRENT_CONFIG" ]; then
-        CURRENT_CONFIG=$(select_config)
-        if [ $? -ne 0 ] || [ -z "$CURRENT_CONFIG" ]; then
+        if ! CURRENT_CONFIG=$(select_config) || [ -z "$CURRENT_CONFIG" ]; then
+            CURRENT_CONFIG=""
+            log "No .conf files found in $CONFIG_DIR"
             log "Waiting for .conf files in $CONFIG_DIR..."
-            sleep 30
+            sleep "$CONFIG_POLL_INTERVAL"
             continue
         fi
 

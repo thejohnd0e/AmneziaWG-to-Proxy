@@ -36,10 +36,6 @@ done
 
 echo "--- [entrypoint] Active config established, starting proxies ---"
 
-# Openresolv shenanigans (from upstream)
-cat /etc/resolv.conf | resolvconf -a control > /dev/null 2>&1
-resolvconf -u > /dev/null 2>&1
-
 # Grab gateway before adding routes
 IP4GATEWAY=$(ip route | awk '/default/ { print $3 }')
 IP6GATEWAY=$(ip -6 route | awk '/default/ { print $3 }')
