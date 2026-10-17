@@ -47,6 +47,10 @@ At startup the manager measures every config before connecting:
 - Configs that cannot start are moved to `bad_config/` at once. Configs that
   stay unreachable get a strike and are moved after `QUARANTINE_AFTER` strikes,
   so one network blip does not cost a working config.
+- Fast start (`FAST_START=1`): the config that was active last is remembered in
+  `bad_config/.last_active`. After a container restart it is tried first and, if
+  it passes the health check, the ranking is skipped entirely (the proxy is up
+  in seconds). Only when it fails does the full ranking run.
 - After `RANK_BUDGET` seconds the ranking stops as soon as one config works,
   so a long list of dead configs cannot delay the proxy. Untested configs stay
   in `config/` and are tried in the next round.

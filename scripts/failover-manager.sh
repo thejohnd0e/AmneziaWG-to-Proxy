@@ -24,6 +24,8 @@ TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-2}"
 QUARANTINE_AFTER="${QUARANTINE_AFTER:-2}"
 RANK_BUDGET="${RANK_BUDGET:-300}"
 STRIKE_DIR="${STRIKE_DIR:-$BAD_DIR/.strikes}"
+FAST_START="${FAST_START:-1}"
+LAST_ACTIVE_FILE="${LAST_ACTIVE_FILE:-$BAD_DIR/.last_active}"
 SPEED_TEST="${SPEED_TEST:-1}"
 SPEED_TEST_URL="${SPEED_TEST_URL:-}"
 
@@ -239,10 +241,22 @@ log "Interval: ${INTERVAL}s | Failure threshold: $FAIL_THRESHOLD | Speed test: $
 
 CURRENT_CONFIG=""
 RANKED=""
+FAST_TRIED=""
 
 while true; do
     # No active config — pick the fastest known one.
     if [ -z "$CURRENT_CONFIG" ]; then
+        # Fast start: after a restart, try the config that worked last time before
+        # ranking anything. Only if it fails does the full ranking run.
+        if [ -z "$RANKED" ] && [ "$FAST_START" = "1" ] && [ -z "$FAST_TRIED" ]; then
+            FAST_TRIED=1
+            LAST=$(cat "$LAST_ACTIVE_FILE" 2>/dev/null)
+            if [ -n "$LAST" ] && [ -f "$CONFIG_DIR/$LAST" ]; then
+                log "Fast start: trying the last working config $LAST first"
+                RANKED=$(printf '0\t%s\n' "$CONFIG_DIR/$LAST")
+            fi
+        fi
+
         if [ -z "$RANKED" ]; then
             if [ "$SPEED_TEST" = "1" ]; then
                 log "Ranking configs by latency..."
@@ -290,6 +304,7 @@ while true; do
         clear_strikes "$CURRENT_CONFIG"
         log "Config $(basename "$CURRENT_CONFIG") is ACTIVE"
         echo "$CURRENT_CONFIG" > "$ACTIVE_MARKER"
+        basename "$CURRENT_CONFIG" > "$LAST_ACTIVE_FILE" 2>/dev/null || true
         echo "0" > "$FAILURE_FILE"
     fi
 

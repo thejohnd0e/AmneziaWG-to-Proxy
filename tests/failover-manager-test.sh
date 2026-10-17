@@ -403,7 +403,7 @@ test_failed_health_check_is_quarantined_only_after_repeated_strikes() {
     printf '%s\n' '#!/bin/sh' '! grep -q "PrivateKey = a" "$ROOT/wg/wg0.conf"' > "$root/bin/check-tunnel"
     chmod +x "$root/bin/check-tunnel"
 
-    export SPEED_TEST=1 QUARANTINE_AFTER=2 FAILOVER_FAILURES=1
+    export SPEED_TEST=1 QUARANTINE_AFTER=2 FAILOVER_FAILURES=1 FAST_START=0
     run_restart_manager "$root"
     wait_for_file "$root/active"
     grep -q "b.conf" "$root/active" || fail "expected b.conf to become active"
@@ -419,7 +419,7 @@ test_failed_health_check_is_quarantined_only_after_repeated_strikes() {
     assert_file_exists "$root/bad/a.conf"
     [ ! -f "$root/configs/a.conf" ] || fail "a.conf should have left the config directory"
     stop_manager
-    unset SPEED_TEST QUARANTINE_AFTER FAILOVER_FAILURES
+    unset SPEED_TEST QUARANTINE_AFTER FAILOVER_FAILURES FAST_START
     echo "PASS: a failed health check is quarantined only after repeated strikes"
 }
 
@@ -450,6 +450,62 @@ test_ranking_stops_after_budget_once_a_config_works() {
     echo "PASS: ranking stops after the budget once a config works"
 }
 
+test_fast_start_uses_last_working_config() {
+    root="$TMP_ROOT/fast-start"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    for name in a b c; do
+        printf '%s\n' '[Interface]' "PrivateKey = $name" > "$root/configs/$name.conf"
+    done
+    printf '%s\n' 'c.conf' > "$root/bad/.last_active"
+    make_restart_commands "$root"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    export SPEED_TEST=1
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    wait_for_log "$root/manager.log" "ACTIVE"
+    stop_manager
+    unset SPEED_TEST
+
+    grep -q "c.conf" "$root/active" || fail "expected the last working config c.conf to be active"
+    grep -q "Fast start" "$root/manager.log" || fail "expected a fast start"
+    if grep -q "Speed test: [a-z]*\.conf" "$root/manager.log"; then
+        fail "fast start must not rank the other configs"
+    fi
+    echo "PASS: fast start uses the last working config"
+}
+
+test_fast_start_falls_back_to_ranking() {
+    root="$TMP_ROOT/fast-start-fallback"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    for name in a b c; do
+        printf '%s\n' '[Interface]' "PrivateKey = $name" > "$root/configs/$name.conf"
+    done
+    printf '%s\n' 'c.conf' > "$root/bad/.last_active"
+    make_restart_commands "$root"
+    # the remembered config c is dead, the others are fine
+    printf '%s\n' '#!/bin/sh' '! grep -q "PrivateKey = c" "$ROOT/wg/wg0.conf"' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    export SPEED_TEST=1 QUARANTINE_AFTER=5 FAILOVER_FAILURES=1
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    wait_for_log "$root/manager.log" "ACTIVE"
+    stop_manager
+    unset SPEED_TEST QUARANTINE_AFTER FAILOVER_FAILURES
+
+    grep -q "Fast start" "$root/manager.log" || fail "expected a fast start attempt"
+    grep -q "Ranking configs" "$root/manager.log" || fail "expected the ranking after the failed fast start"
+    if grep -q "c.conf" "$root/active"; then
+        fail "the dead remembered config must not become active"
+    fi
+    assert_file_exists "$root/configs/c.conf"
+    [ "$(cat "$root/bad/.last_active")" = "$(basename "$(cat "$root/active")")" ] \
+        || fail "expected the new active config to be remembered"
+    echo "PASS: fast start falls back to ranking"
+}
+
 test_missing_wg_directory_is_created
 test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
@@ -460,5 +516,7 @@ test_only_config_is_never_quarantined
 test_unrecoverable_config_is_replaced_after_restarts
 test_failed_health_check_is_quarantined_only_after_repeated_strikes
 test_ranking_stops_after_budget_once_a_config_works
+test_fast_start_uses_last_working_config
+test_fast_start_falls_back_to_ranking
 test_tun_device_is_created
 echo "All failover manager tests passed"
