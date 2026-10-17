@@ -23,7 +23,13 @@ It continuously monitors the active tunnel and switches to the next config when 
    c. If ok: reset failure counter
    d. If fail: increment counter
    e. If counter >= FAILOVER_FAILURES:
-      - awg-quick down wg0
+      - Restart the tunnel on the same config (awg-quick down/up, fresh UDP
+        source port), up to TUNNEL_RESTARTS times; if it is healthy again,
+        keep the config and go back to monitoring
+      - If the restarts did not help and this is the only config, keep it in
+        config/ and retry later (a server-side outage never leaves the
+        container without a config)
+      - Otherwise: awg-quick down wg0
       - Move failed config to bad_config/
       - Pick the next config from the ranked list
       - If the list is exhausted → re-rank the remaining configs

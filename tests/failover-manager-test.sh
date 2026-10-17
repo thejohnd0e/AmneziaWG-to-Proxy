@@ -260,10 +260,144 @@ test_tun_device_is_created() {
     echo "PASS: missing TUN device is created"
 }
 
+wait_for_log() {
+    file="$1"
+    pattern="$2"
+    attempts=0
+    while ! grep -q "$pattern" "$file" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+}
+
+# Fakes for the restart tests. awg-quick counts "up" calls; check-tunnel fails
+# while $root/broken exists and the staged config is still the first one.
+make_restart_commands() {
+    root="$1"
+    mkdir -p "$root/bin"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        '[ "$1" = up ] || exit 0' \
+        'count=$(cat "$UP_COUNT" 2>/dev/null || echo 0)' \
+        'echo $((count + 1)) > "$UP_COUNT"' > "$root/bin/awg-quick"
+    printf '%s\n' '#!/bin/sh' 'echo "0.001 0.050"' > "$root/bin/curl"
+    chmod +x "$root/bin/awg-quick" "$root/bin/curl"
+}
+
+run_restart_manager() {
+    root="$1"
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    UP_COUNT="$root/up-count" \
+    BROKEN="$root/broken" \
+    ROOT="$root" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    SPEED_TEST=0 \
+    FAILOVER_FAILURES=2 \
+    FAILOVER_INTERVAL=0.1 \
+    CONFIG_POLL_INTERVAL=0.2 \
+    TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-1}" \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+}
+
+stop_manager() {
+    kill "$MANAGER_PID"
+    wait "$MANAGER_PID" 2>/dev/null || true
+    MANAGER_PID=""
+}
+
+test_dead_tunnel_is_restarted_not_quarantined() {
+    root="$TMP_ROOT/restart-recovers"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    make_restart_commands "$root"
+    # healthy until $root/broken appears; a restart (second "up") heals it
+    printf '%s\n' \
+        '#!/bin/sh' \
+        '[ ! -f "$BROKEN" ] || [ "$(cat "$UP_COUNT")" -gt 1 ]' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    : > "$root/broken"
+    wait_for_log "$root/manager.log" "Tunnel recovered after restart"
+
+    grep -q "Tunnel recovered after restart" "$root/manager.log" \
+        || fail "expected the tunnel to be restarted and recover"
+    assert_file_exists "$root/configs/a.conf"
+    assert_no_configs "$root/bad"
+    [ "$(cat "$root/up-count")" -ge 2 ] || fail "expected awg-quick up to run again"
+
+    stop_manager
+    echo "PASS: dead tunnel is restarted, config is not quarantined"
+}
+
+test_only_config_is_never_quarantined() {
+    root="$TMP_ROOT/only-config"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    make_restart_commands "$root"
+    # healthy until $root/broken appears, then dead for good
+    printf '%s\n' '#!/bin/sh' '[ ! -f "$BROKEN" ]' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    : > "$root/broken"
+    wait_for_log "$root/manager.log" "Only config a.conf: keeping it"
+
+    grep -q "Only config a.conf: keeping it" "$root/manager.log" \
+        || fail "expected the only config to be kept"
+    assert_file_exists "$root/configs/a.conf"
+    assert_no_configs "$root/bad"
+
+    stop_manager
+    echo "PASS: the only config is never quarantined"
+}
+
+test_unrecoverable_config_is_replaced_after_restarts() {
+    root="$TMP_ROOT/restart-then-switch"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = b' > "$root/configs/b.conf"
+    make_restart_commands "$root"
+    # config a dies for good once $root/broken appears; config b is fine
+    printf '%s\n' \
+        '#!/bin/sh' \
+        '[ ! -f "$BROKEN" ] || ! grep -q "PrivateKey = a" "$WG_CONF"' > "$root/bin/check-tunnel"
+    sed -i 's|"\$WG_CONF"|"$ROOT/wg/wg0.conf"|' "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    : > "$root/broken"
+    wait_for_file "$root/bad/a.conf"
+    wait_for_log "$root/manager.log" "Config b.conf is ACTIVE"
+
+    assert_file_exists "$root/bad/a.conf"
+    assert_file_exists "$root/configs/b.conf"
+    grep -q "Restarting tunnel (1 / 1): a.conf" "$root/manager.log" \
+        || fail "expected a restart before quarantining a.conf"
+    grep -q "b.conf" "$root/active" || fail "expected b.conf to become active"
+
+    stop_manager
+    echo "PASS: unrecoverable config is replaced after restarts"
+}
+
 test_missing_wg_directory_is_created
 test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
 test_transient_initial_health_failure_is_retried
 test_fastest_config_is_selected
+test_dead_tunnel_is_restarted_not_quarantined
+test_only_config_is_never_quarantined
+test_unrecoverable_config_is_replaced_after_restarts
 test_tun_device_is_created
 echo "All failover manager tests passed"

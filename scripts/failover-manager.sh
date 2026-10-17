@@ -20,6 +20,7 @@ INTERVAL="${FAILOVER_INTERVAL:-15}"
 FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
 CONFIG_POLL_INTERVAL="${CONFIG_POLL_INTERVAL:-30}"
 HEALTH_TIMEOUT="${FAILOVER_TIMEOUT:-8}"
+TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-2}"
 SPEED_TEST="${SPEED_TEST:-1}"
 SPEED_TEST_URL="${SPEED_TEST_URL:-}"
 
@@ -98,6 +99,18 @@ health_check_with_retries() {
     done
 
     return 1
+}
+
+# Bring the active tunnel down and up again on the same config. This gives
+# amneziawg a fresh UDP source port, which clears a stuck NAT/conntrack mapping
+# (handshakes stop getting answers while the config itself is fine).
+# Returns 0 if the tunnel is healthy afterwards.
+restart_tunnel() {
+    local config="$1"
+    awg-quick down wg0 > /dev/null 2>&1
+    sleep 2
+    start_tunnel "$config" || return 1
+    health_check_with_retries "$config"
 }
 
 # Best round-trip time in milliseconds through wg0 (empty on failure).
@@ -262,8 +275,35 @@ while true; do
         continue
     fi
 
-    # Threshold reached — switch config
-    log "Failure threshold reached. Switching config..."
+    # Threshold reached — first restart the tunnel on the same config
+    log "Failure threshold reached."
+    attempt=1
+    recovered=0
+    while [ "$attempt" -le "$TUNNEL_RESTARTS" ]; do
+        log "Restarting tunnel ($attempt / $TUNNEL_RESTARTS): $(basename "$CURRENT_CONFIG")"
+        if restart_tunnel "$CURRENT_CONFIG"; then
+            recovered=1
+            break
+        fi
+        attempt=$((attempt + 1))
+    done
+    if [ "$recovered" = 1 ]; then
+        log "Tunnel recovered after restart: $(basename "$CURRENT_CONFIG")"
+        echo "0" > "$FAILURE_FILE"
+        continue
+    fi
+
+    # The restart did not help. Never quarantine the only config: an outage
+    # on the server side must not leave the container without any config.
+    if [ -z "$RANKED" ] && [ "$(get_configs | wc -l)" -le 1 ]; then
+        log "Only config $(basename "$CURRENT_CONFIG"): keeping it, retrying in ${CONFIG_POLL_INTERVAL}s"
+        echo "0" > "$FAILURE_FILE"
+        sleep "$CONFIG_POLL_INTERVAL"
+        continue
+    fi
+
+    # Otherwise switch config
+    log "Switching config..."
     awg-quick down wg0 > /dev/null 2>&1
     move_to_bad "$CURRENT_CONFIG"
     CURRENT_CONFIG=""

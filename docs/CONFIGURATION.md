@@ -7,7 +7,8 @@ All settings are controlled via environment variables in `.env`.
 | Variable | Default | Description |
 |---|---|---|
 | `FAILOVER_INTERVAL` | `15` | Seconds between health checks |
-| `FAILOVER_FAILURES` | `3` | Consecutive failures before switching config |
+| `FAILOVER_FAILURES` | `3` | Consecutive failures before the tunnel is restarted / the config is switched |
+| `TUNNEL_RESTARTS` | `2` | Tunnel restarts on the same config before it is quarantined (`0` = quarantine at once) |
 | `FAILOVER_TIMEOUT` | `8` | Max seconds per HTTPS probe |
 | `SPEED_TEST` | `1` | Speed-test configs at startup and connect to the fastest |
 | `SPEED_TEST_URL` | *(first `HEALTH_URLS` entry)* | URL used for latency probes |
@@ -56,6 +57,7 @@ The same resolvers are used by the config checker.
 ```dotenv
 FAILOVER_INTERVAL=15
 FAILOVER_FAILURES=3
+TUNNEL_RESTARTS=2
 FAILOVER_TIMEOUT=8
 SPEED_TEST=1
 DNS_PRIMARY=1.1.1.1
