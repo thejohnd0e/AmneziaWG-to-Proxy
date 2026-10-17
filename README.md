@@ -12,7 +12,7 @@ Provides SOCKS5 (port 8200) and HTTP (port 9200) proxies with automatic config f
 
 - Speed-tests all configs at startup and connects to the fastest one
 - Automatic detection and switching to the next working config
-- Rejected configs are moved to `bad_config/` and never retried
+- Configs that keep failing are moved to `bad_config/` (a single failure only counts as a strike); the tunnel is restarted automatically first
 - Dual health check endpoints (Google + Cloudflare)
 - Manual proxy checker CLI tool
 - All tunables configurable via `.env`
@@ -83,7 +83,7 @@ On startup the failover manager speed-tests every config before connecting:
 4. Tear the tunnel down.
 
 Working configs are ranked by latency, and the fastest one becomes active.
-Configs that fail to start or stay unreachable are moved to `bad_config/`.
+Configs that cannot start are moved to `bad_config/` at once; configs that stay unreachable get a strike and are moved after `QUARANTINE_AFTER` strikes. The ranking stops after `RANK_BUDGET` seconds as soon as one config works.
 The ranked list is reused for later failovers and rebuilt when exhausted.
 
 Disable it with `SPEED_TEST=0` to use the first config by name instead.
@@ -119,7 +119,7 @@ server-02.conf                   BAD     -               -        -        -    
 Checked: 2 | Working: 1 | Failed: 1
 ```
 
-Non-working configs are automatically moved to `bad_config/`.
+Non-working configs are moved to `bad_config/` (after repeated failures, see `QUARANTINE_AFTER`).
 
 ## Documentation
 

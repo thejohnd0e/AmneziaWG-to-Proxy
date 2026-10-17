@@ -298,8 +298,10 @@ run_restart_manager() {
     ROOT="$root" \
     TUN_SETUP="$TUN_SETUP" \
     TUN_DEVICE=/dev/null \
-    SPEED_TEST=0 \
-    FAILOVER_FAILURES=2 \
+    SPEED_TEST="${SPEED_TEST:-0}" \
+    QUARANTINE_AFTER="${QUARANTINE_AFTER:-1}" \
+    RANK_BUDGET="${RANK_BUDGET:-300}" \
+    FAILOVER_FAILURES="${FAILOVER_FAILURES:-2}" \
     FAILOVER_INTERVAL=0.1 \
     CONFIG_POLL_INTERVAL=0.2 \
     TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-1}" \
@@ -391,6 +393,63 @@ test_unrecoverable_config_is_replaced_after_restarts() {
     echo "PASS: unrecoverable config is replaced after restarts"
 }
 
+test_failed_health_check_is_quarantined_only_after_repeated_strikes() {
+    root="$TMP_ROOT/strikes"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = b' > "$root/configs/b.conf"
+    make_restart_commands "$root"
+    # config a never passes the health check, config b always does
+    printf '%s\n' '#!/bin/sh' '! grep -q "PrivateKey = a" "$ROOT/wg/wg0.conf"' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    export SPEED_TEST=1 QUARANTINE_AFTER=2 FAILOVER_FAILURES=1
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    grep -q "b.conf" "$root/active" || fail "expected b.conf to become active"
+    assert_file_exists "$root/configs/a.conf"
+    [ ! -f "$root/bad/a.conf" ] || fail "one failed health check must not quarantine a.conf"
+    [ "$(cat "$root/bad/.strikes/a.conf")" = 1 ] || fail "expected one recorded strike for a.conf"
+    stop_manager
+
+    # the strike survives a restart: the second failure quarantines a.conf
+    rm -f "$root/active"
+    run_restart_manager "$root"
+    wait_for_file "$root/bad/a.conf"
+    assert_file_exists "$root/bad/a.conf"
+    [ ! -f "$root/configs/a.conf" ] || fail "a.conf should have left the config directory"
+    stop_manager
+    unset SPEED_TEST QUARANTINE_AFTER FAILOVER_FAILURES
+    echo "PASS: a failed health check is quarantined only after repeated strikes"
+}
+
+test_ranking_stops_after_budget_once_a_config_works() {
+    root="$TMP_ROOT/rank-budget"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    for name in a b c; do
+        printf '%s\n' '[Interface]' "PrivateKey = $name" > "$root/configs/$name.conf"
+    done
+    make_restart_commands "$root"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    export SPEED_TEST=1 RANK_BUDGET=0
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    wait_for_log "$root/manager.log" "ACTIVE"
+    stop_manager
+    unset SPEED_TEST RANK_BUDGET
+
+    grep -q "Ranking budget" "$root/manager.log" || fail "expected the ranking budget to be hit"
+    grep -q "Speed test: a.conf = " "$root/manager.log" || fail "expected the first config to be tested"
+    if grep -q "Speed test: c.conf = " "$root/manager.log"; then
+        fail "ranking should have stopped before testing c.conf"
+    fi
+    assert_file_exists "$root/configs/c.conf"
+    assert_no_configs "$root/bad"
+    echo "PASS: ranking stops after the budget once a config works"
+}
+
 test_missing_wg_directory_is_created
 test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
@@ -399,5 +458,7 @@ test_fastest_config_is_selected
 test_dead_tunnel_is_restarted_not_quarantined
 test_only_config_is_never_quarantined
 test_unrecoverable_config_is_replaced_after_restarts
+test_failed_health_check_is_quarantined_only_after_repeated_strikes
+test_ranking_stops_after_budget_once_a_config_works
 test_tun_device_is_created
 echo "All failover manager tests passed"

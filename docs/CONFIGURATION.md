@@ -8,7 +8,9 @@ All settings are controlled via environment variables in `.env`.
 |---|---|---|
 | `FAILOVER_INTERVAL` | `15` | Seconds between health checks |
 | `FAILOVER_FAILURES` | `3` | Consecutive failures before the tunnel is restarted / the config is switched |
-| `TUNNEL_RESTARTS` | `2` | Tunnel restarts on the same config before it is quarantined (`0` = quarantine at once) |
+| `TUNNEL_RESTARTS` | `2` | Tunnel restarts on the same config before it gets a strike (`0` = no restarts) |
+| `QUARANTINE_AFTER` | `2` | Failed health checks (strikes, kept across restarts) before a config is moved to `bad_config/` |
+| `RANK_BUDGET` | `300` | Seconds after which the startup ranking stops once one config works; untested configs stay in `config/` for the next round |
 | `FAILOVER_TIMEOUT` | `8` | Max seconds per HTTPS probe |
 | `SPEED_TEST` | `1` | Speed-test configs at startup and connect to the fastest |
 | `SPEED_TEST_URL` | *(first `HEALTH_URLS` entry)* | URL used for latency probes |
@@ -58,6 +60,8 @@ The same resolvers are used by the config checker.
 FAILOVER_INTERVAL=15
 FAILOVER_FAILURES=3
 TUNNEL_RESTARTS=2
+QUARANTINE_AFTER=2
+RANK_BUDGET=300
 FAILOVER_TIMEOUT=8
 SPEED_TEST=1
 DNS_PRIMARY=1.1.1.1

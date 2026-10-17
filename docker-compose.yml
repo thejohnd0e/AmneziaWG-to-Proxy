@@ -35,6 +35,8 @@ services:
       FAILOVER_INTERVAL: ${FAILOVER_INTERVAL:-15}
       FAILOVER_FAILURES: ${FAILOVER_FAILURES:-3}
       TUNNEL_RESTARTS: ${TUNNEL_RESTARTS:-2}
+      QUARANTINE_AFTER: ${QUARANTINE_AFTER:-2}
+      RANK_BUDGET: ${RANK_BUDGET:-300}
       FAILOVER_TIMEOUT: ${FAILOVER_TIMEOUT:-8}
       HEALTH_URLS: ${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}
       HEALTH_URL_CHECK: ${HEALTH_URL_CHECK:-}

@@ -21,6 +21,9 @@ FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
 CONFIG_POLL_INTERVAL="${CONFIG_POLL_INTERVAL:-30}"
 HEALTH_TIMEOUT="${FAILOVER_TIMEOUT:-8}"
 TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-2}"
+QUARANTINE_AFTER="${QUARANTINE_AFTER:-2}"
+RANK_BUDGET="${RANK_BUDGET:-300}"
+STRIKE_DIR="${STRIKE_DIR:-$BAD_DIR/.strikes}"
 SPEED_TEST="${SPEED_TEST:-1}"
 SPEED_TEST_URL="${SPEED_TEST_URL:-}"
 
@@ -57,6 +60,30 @@ move_to_bad() {
     else
         log "ERROR: Failed to move $base to bad_config"
     fi
+}
+
+# A config that merely fails a health check is not quarantined at once: a network
+# blip must not cost a working config. It gets a strike (kept across restarts in
+# $STRIKE_DIR) and is moved to bad_config/ only after QUARANTINE_AFTER strikes.
+strike_config() {
+    local config="$1"
+    local base=$(basename "$config")
+    local n
+
+    mkdir -p "$STRIKE_DIR"
+    n=$(cat "$STRIKE_DIR/$base" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    if [ "$n" -ge "$QUARANTINE_AFTER" ]; then
+        rm -f "$STRIKE_DIR/$base"
+        move_to_bad "$config"
+    else
+        echo "$n" > "$STRIKE_DIR/$base"
+        log "$base failed ($n / $QUARANTINE_AFTER), keeping it for another try"
+    fi
+}
+
+clear_strikes() {
+    rm -f "$STRIKE_DIR/$(basename "$1")"
 }
 
 # --- Bring up tunnel with a config ---
@@ -137,8 +164,11 @@ measure_latency() {
     printf '%b' "$samples" | sort -n | sed -n '1p' | awk '{printf "%.0f", $1 * 1000}'
 }
 
-# Speed-test every config. Prints "latency<TAB>config" lines sorted best-first.
-# Configs that cannot start or pass a health check are quarantined.
+# Speed-test configs. Prints "latency<TAB>config" lines sorted best-first.
+# Configs that cannot start are quarantined; configs that fail a health check get
+# a strike. After RANK_BUDGET seconds the ranking stops once at least one config
+# works, so a long list of dead configs cannot delay the proxy; configs that were
+# not tested yet stay in $CONFIG_DIR for the next round.
 rank_configs() {
     local configs
     configs=$(get_configs)
@@ -146,7 +176,12 @@ rank_configs() {
 
     local results=""
     local config status ms
+    local started=$(date +%s)
     for config in $configs; do
+        if [ -n "$results" ] && [ $(($(date +%s) - started)) -ge "$RANK_BUDGET" ]; then
+            log "Ranking budget (${RANK_BUDGET}s) reached: using what is tested, the rest is tried later"
+            break
+        fi
         log "Speed test: $(basename "$config")"
 
         start_tunnel "$config"
@@ -164,10 +199,11 @@ rank_configs() {
         if ! health_check_with_retries "$config"; then
             log "No connectivity for $(basename "$config")"
             awg-quick down wg0 > /dev/null 2>&1
-            move_to_bad "$config"
+            strike_config "$config"
             continue
         fi
 
+        clear_strikes "$config"
         ms=$(measure_latency)
         log "Speed test: $(basename "$config") = ${ms:-?} ms"
         results="${results}${ms}\t${config}\n"
@@ -246,11 +282,12 @@ while true; do
 
         if ! health_check_with_retries "$CURRENT_CONFIG"; then
             awg-quick down wg0 > /dev/null 2>&1
-            move_to_bad "$CURRENT_CONFIG"
+            strike_config "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
             continue
         fi
 
+        clear_strikes "$CURRENT_CONFIG"
         log "Config $(basename "$CURRENT_CONFIG") is ACTIVE"
         echo "$CURRENT_CONFIG" > "$ACTIVE_MARKER"
         echo "0" > "$FAILURE_FILE"
@@ -305,7 +342,7 @@ while true; do
     # Otherwise switch config
     log "Switching config..."
     awg-quick down wg0 > /dev/null 2>&1
-    move_to_bad "$CURRENT_CONFIG"
+    strike_config "$CURRENT_CONFIG"
     CURRENT_CONFIG=""
     echo "0" > "$FAILURE_FILE"
 

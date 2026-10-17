@@ -12,7 +12,7 @@ It continuously monitors the active tunnel and switches to the next config when 
 ```
 1. Speed-test every *.conf in /configs:
    a. Copy to wg0.conf, awg-quick up wg0
-   b. Health check (HTTPS via wg0); on failure after retries → bad_config/
+   b. Health check (HTTPS via wg0); on failure after retries → a strike (bad_config/ after QUARANTINE_AFTER strikes)
    c. Measure latency (best of 3 probes through wg0)
    d. awg-quick down wg0
 2. Rank working configs by latency, fastest first
@@ -30,7 +30,8 @@ It continuously monitors the active tunnel and switches to the next config when 
         config/ and retry later (a server-side outage never leaves the
         container without a config)
       - Otherwise: awg-quick down wg0
-      - Move failed config to bad_config/
+      - Give the failed config a strike; after QUARANTINE_AFTER strikes (kept
+        across container restarts in bad_config/.strikes/) move it to bad_config/
       - Pick the next config from the ranked list
       - If the list is exhausted → re-rank the remaining configs
       - If no configs left → unhealthy, periodic retry
@@ -43,7 +44,12 @@ At startup the manager measures every config before connecting:
 - Each config is brought up and checked for connectivity.
 - Latency is the **best of 3** HTTPS probes through `wg0`, with DNS lookup
   time subtracted so configs are compared by server latency, not resolver speed.
-- Configs that fail to start or stay unreachable are moved to `bad_config/`.
+- Configs that cannot start are moved to `bad_config/` at once. Configs that
+  stay unreachable get a strike and are moved after `QUARANTINE_AFTER` strikes,
+  so one network blip does not cost a working config.
+- After `RANK_BUDGET` seconds the ranking stops as soon as one config works,
+  so a long list of dead configs cannot delay the proxy. Untested configs stay
+  in `config/` and are tried in the next round.
 - The fastest working config becomes ACTIVE; the rest are kept ranked for failover.
 
 This makes startup slower (roughly a few seconds per config) but selects the
