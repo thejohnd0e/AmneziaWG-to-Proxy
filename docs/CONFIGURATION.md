@@ -9,9 +9,10 @@ All settings are controlled via environment variables in `.env`.
 | `FAILOVER_INTERVAL` | `15` | Seconds between health checks |
 | `FAILOVER_FAILURES` | `3` | Consecutive failures before the tunnel is restarted / the config is switched |
 | `TUNNEL_RESTARTS` | `2` | Tunnel restarts on the same config before it gets a strike (`0` = no restarts) |
-| `QUARANTINE_AFTER` | `2` | Failed health checks (strikes, kept across restarts) before a config is moved to `bad_config/` |
+| `QUARANTINE_AFTER` | `3` | Failed health checks (strikes, kept across restarts) before a config is moved to `bad_config/` |
 | `FAST_START` | `1` | After a restart, try the last working config first (remembered in `bad_config/.last_active`) and skip the ranking if it works; `0` = always rank |
-| `RANK_BUDGET` | `300` | Seconds after which the startup ranking stops once one config works; untested configs stay in `config/` for the next round |
+| `RANK_BUDGET` | `0` | Seconds after which the startup ranking stops once one config works (`0` = the first working config wins); untested configs stay in `config/` for the next round |
+| `STARTUP_CHECKS` | `1` | Health checks per config at startup; a dead config costs one check, not `FAILOVER_FAILURES` |
 | `FAILOVER_TIMEOUT` | `8` | Max seconds per HTTPS probe |
 | `SPEED_TEST` | `1` | Speed-test configs at startup and connect to the fastest |
 | `SPEED_TEST_URL` | *(first `HEALTH_URLS` entry)* | URL used for latency probes |
@@ -61,8 +62,9 @@ The same resolvers are used by the config checker.
 FAILOVER_INTERVAL=15
 FAILOVER_FAILURES=3
 TUNNEL_RESTARTS=2
-QUARANTINE_AFTER=2
-RANK_BUDGET=300
+QUARANTINE_AFTER=3
+RANK_BUDGET=0
+STARTUP_CHECKS=1
 FAST_START=1
 FAILOVER_TIMEOUT=8
 SPEED_TEST=1

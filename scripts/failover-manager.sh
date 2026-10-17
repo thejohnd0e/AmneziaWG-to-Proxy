@@ -21,8 +21,9 @@ FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
 CONFIG_POLL_INTERVAL="${CONFIG_POLL_INTERVAL:-30}"
 HEALTH_TIMEOUT="${FAILOVER_TIMEOUT:-8}"
 TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-2}"
-QUARANTINE_AFTER="${QUARANTINE_AFTER:-2}"
-RANK_BUDGET="${RANK_BUDGET:-300}"
+QUARANTINE_AFTER="${QUARANTINE_AFTER:-3}"
+RANK_BUDGET="${RANK_BUDGET:-0}"
+STARTUP_CHECKS="${STARTUP_CHECKS:-1}"
 STRIKE_DIR="${STRIKE_DIR:-$BAD_DIR/.strikes}"
 FAST_START="${FAST_START:-1}"
 LAST_ACTIVE_FILE="${LAST_ACTIVE_FILE:-$BAD_DIR/.last_active}"
@@ -111,17 +112,18 @@ start_tunnel() {
     return 1
 }
 
-# Retry a health check up to the failure threshold before giving up.
+# Retry a health check up to $2 times (default: the failure threshold).
 health_check_with_retries() {
     local config="$1"
+    local max="${2:-$FAIL_THRESHOLD}"
     local attempt=1
 
-    while [ "$attempt" -le "$FAIL_THRESHOLD" ]; do
+    while [ "$attempt" -le "$max" ]; do
         if "$CHECK_TUNNEL"; then
             return 0
         fi
-        log "Health check failed ($attempt / $FAIL_THRESHOLD) for $(basename "$config")"
-        if [ "$attempt" -lt "$FAIL_THRESHOLD" ]; then
+        log "Health check failed ($attempt / $max) for $(basename "$config")"
+        if [ "$attempt" -lt "$max" ]; then
             sleep "$INTERVAL"
         fi
         attempt=$((attempt + 1))
@@ -169,8 +171,9 @@ measure_latency() {
 # Speed-test configs. Prints "latency<TAB>config" lines sorted best-first.
 # Configs that cannot start are quarantined; configs that fail a health check get
 # a strike. After RANK_BUDGET seconds the ranking stops once at least one config
-# works, so a long list of dead configs cannot delay the proxy; configs that were
-# not tested yet stay in $CONFIG_DIR for the next round.
+# works (0 = the first working config wins), so a long list of dead configs cannot
+# delay the proxy; configs that were not tested yet stay in $CONFIG_DIR. Each config
+# gets STARTUP_CHECKS health checks here, not the full failure threshold.
 rank_configs() {
     local configs
     configs=$(get_configs)
@@ -184,6 +187,7 @@ rank_configs() {
             log "Ranking budget (${RANK_BUDGET}s) reached: using what is tested, the rest is tried later"
             break
         fi
+        [ "$config" != "$SKIP_CONFIG" ] || continue
         log "Speed test: $(basename "$config")"
 
         start_tunnel "$config"
@@ -198,7 +202,7 @@ rank_configs() {
             continue
         fi
 
-        if ! health_check_with_retries "$config"; then
+        if ! health_check_with_retries "$config" "$STARTUP_CHECKS"; then
             log "No connectivity for $(basename "$config")"
             awg-quick down wg0 > /dev/null 2>&1
             strike_config "$config"
@@ -242,6 +246,7 @@ log "Interval: ${INTERVAL}s | Failure threshold: $FAIL_THRESHOLD | Speed test: $
 CURRENT_CONFIG=""
 RANKED=""
 FAST_TRIED=""
+SKIP_CONFIG=""
 
 while true; do
     # No active config — pick the fastest known one.
@@ -254,6 +259,7 @@ while true; do
             if [ -n "$LAST" ] && [ -f "$CONFIG_DIR/$LAST" ]; then
                 log "Fast start: trying the last working config $LAST first"
                 RANKED=$(printf '0\t%s\n' "$CONFIG_DIR/$LAST")
+                SKIP_CONFIG="$CONFIG_DIR/$LAST"
             fi
         fi
 
@@ -262,6 +268,7 @@ while true; do
                 log "Ranking configs by latency..."
                 RANKED=$(rank_configs)
                 RANK_STATUS=$?
+                SKIP_CONFIG=""
                 if [ "$RANK_STATUS" -eq 2 ]; then
                     exit 1
                 fi
@@ -294,7 +301,7 @@ while true; do
             continue
         fi
 
-        if ! health_check_with_retries "$CURRENT_CONFIG"; then
+        if ! health_check_with_retries "$CURRENT_CONFIG" "$STARTUP_CHECKS"; then
             awg-quick down wg0 > /dev/null 2>&1
             strike_config "$CURRENT_CONFIG"
             CURRENT_CONFIG=""

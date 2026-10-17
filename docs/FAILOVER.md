@@ -51,7 +51,7 @@ At startup the manager measures every config before connecting:
   `bad_config/.last_active`. After a container restart it is tried first and, if
   it passes the health check, the ranking is skipped entirely (the proxy is up
   in seconds). Only when it fails does the full ranking run.
-- After `RANK_BUDGET` seconds the ranking stops as soon as one config works,
+- After `RANK_BUDGET` seconds (default `0`: the first working config wins) the ranking stops as soon as one config works,
   so a long list of dead configs cannot delay the proxy. Untested configs stay
   in `config/` and are tried in the next round.
 - The fastest working config becomes ACTIVE; the rest are kept ranked for failover.

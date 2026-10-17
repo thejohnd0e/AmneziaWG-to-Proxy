@@ -83,7 +83,7 @@ On startup the failover manager speed-tests every config before connecting:
 4. Tear the tunnel down.
 
 Working configs are ranked by latency, and the fastest one becomes active.
-Configs that cannot start are moved to `bad_config/` at once; configs that stay unreachable get a strike and are moved after `QUARANTINE_AFTER` strikes. The ranking stops after `RANK_BUDGET` seconds as soon as one config works.
+Configs that cannot start are moved to `bad_config/` at once; configs that stay unreachable get a strike and are moved after `QUARANTINE_AFTER` strikes. Startup is fast: the first working config wins (`RANK_BUDGET=0`) and each config gets one health check (`STARTUP_CHECKS`).
 The ranked list is reused for later failovers and rebuilt when exhausted.
 
 Disable it with `SPEED_TEST=0` to use the first config by name instead.

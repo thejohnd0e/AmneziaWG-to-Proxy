@@ -183,6 +183,7 @@ test_transient_initial_health_failure_is_retried() {
     WG_CONF="$root/wg/wg0.conf" \
     CHECK_TUNNEL="$root/bin/check-tunnel" \
     CHECK_COUNT="$root/check-count" \
+    STARTUP_CHECKS=3 \
     TUN_SETUP="$TUN_SETUP" \
     TUN_DEVICE=/dev/null \
     FAILOVER_FAILURES=3 \
