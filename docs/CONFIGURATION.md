@@ -2,6 +2,12 @@
 
 All settings are controlled via environment variables in `.env`.
 
+## Config format
+
+`config/*.conf` may be AmneziaWG 1.0 (`Jc/Jmin/Jmax`, `S1/S2`, `H1-H4`), 1.5 (adds `I1-I5`) or 2.0 (adds `S3/S4` and `H1-H4` as ranges like `100000-200000`). Nothing has to be set: the bundled `amneziawg-go` and `awg-quick` apply whatever the file contains, and configs of different versions can be mixed in one folder. Checked with a real handshake and ping between two containers of the image for each version. Both ends must use the same `S1-S4` and `H1-H4`; `Jc/Jmin/Jmax` and `I1-I5` are client-side only.
+
+The base image `ghcr.io/mainfrezzer/amnezia-bridge` builds `amneziawg-go` from upstream `master` at its build time. If a future protocol field is rejected (`awg-quick` fails with a parse error), rebuild the image against a newer base: `docker compose build --pull --no-cache`.
+
 ## Failover Settings
 
 | Variable | Default | Description |

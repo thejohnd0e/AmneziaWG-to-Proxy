@@ -12,6 +12,7 @@ Provides SOCKS5 (port 8200) and HTTP (port 9200) proxies with automatic config f
 
 - Speed-tests all configs at startup and connects to the fastest one
 - Automatic detection and switching to the next working config
+- Supports AmneziaWG 1.0, 1.5 (`I1`-`I5`) and 2.0 (`S3`/`S4`, `H1`-`H4` ranges) configs; the version is whatever the config contains
 - Configs that keep failing are moved to `bad_config/` (a single failure only counts as a strike); the tunnel is restarted automatically first
 - Dual health check endpoints (Google + Cloudflare)
 - Manual proxy checker CLI tool
