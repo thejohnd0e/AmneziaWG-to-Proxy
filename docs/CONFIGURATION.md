@@ -8,6 +8,20 @@ All settings are controlled via environment variables in `.env`.
 
 The base image `ghcr.io/mainfrezzer/amnezia-bridge` builds `amneziawg-go` from upstream `master` at its build time. If a future protocol field is rejected (`awg-quick` fails with a parse error), rebuild the image against a newer base: `docker compose build --pull --no-cache`.
 
+## WARP config generator
+
+`scripts/warp-gen.sh [count] [proxy]` (inside the container: `/scripts/warp-gen.sh 10`) registers `count` free anonymous Cloudflare WARP devices and writes `warp-<id>.conf` files. Cloudflare's end is plain WireGuard, so the AmneziaWG fields are the client-only ones: `Jc/Jmin/Jmax` junk packets and a QUIC-like `I1` signature (random per config), with `S1=S2=0` and `H1-H4=1-4`. The private key is generated on the machine that runs the script.
+
+| Variable / argument | Default | Description |
+|---|---|---|
+| `count` (1st argument) | `1` | Number of registrations |
+| `proxy` (2nd argument) or `WARP_PROXY` | *(none)* | Optional HTTP proxy used only for the registration; some ISPs block `api.cloudflareclient.com` |
+| `WARP_OUT` | `/configs` | Where the configs are written |
+| `WARP_ENDPOINT` | `162.159.192.7:4500` | Cloudflare endpoint written into the configs |
+| `WARP_PAUSE` | `3` | Seconds between registrations (rate limits) |
+
+The API is unofficial and may change or limit registrations from one address: do not generate hundreds at once.
+
 ## Failover Settings
 
 | Variable | Default | Description |

@@ -74,6 +74,16 @@ Proxies are available at:
 └──────────────────────────────────────────────────┘
 ```
 
+## Free Cloudflare WARP configs
+
+`scripts/warp-gen.sh` registers anonymous WARP devices and writes ready AmneziaWG configs into `config/` (the failover manager picks them up by itself):
+
+```bash
+docker compose exec amnezia-proxy /scripts/warp-gen.sh 10
+```
+
+Each config is its own registration with its own key pair, generated locally. If your ISP blocks the Cloudflare API, register through any tunnel that reaches it with an optional proxy argument, e.g. `/scripts/warp-gen.sh 10 http://192.168.0.12:9220`; the configs themselves work from anywhere. Details in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 ## Fastest Server Selection
 
 On startup the failover manager speed-tests every config before connecting:
