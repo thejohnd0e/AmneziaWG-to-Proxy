@@ -342,6 +342,29 @@ test_dead_tunnel_is_restarted_not_quarantined() {
     echo "PASS: dead tunnel is restarted, config is not quarantined"
 }
 
+test_startup_probes_wait_longer_than_monitoring() {
+    root="$TMP_ROOT/startup-timeout"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s
+' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    make_restart_commands "$root"
+    printf '%s
+' '#!/bin/sh' 'echo "$FAILOVER_TIMEOUT" >> "$ROOT/timeouts"' 'exit 0' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    FAILOVER_TIMEOUT=3 STARTUP_TIMEOUT=9 run_restart_manager "$root"
+    wait_for_file "$root/active"
+    attempts=0
+    while ! grep -q '^3$' "$root/timeouts" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+        sleep 0.1; attempts=$((attempts + 1))
+    done
+    stop_manager
+
+    [ "$(sed -n '1p' "$root/timeouts")" = 9 ] || fail "startup probe must use STARTUP_TIMEOUT"
+    grep -q '^3$' "$root/timeouts" || fail "monitoring probe must use FAILOVER_TIMEOUT"
+    echo "PASS: startup probes wait longer than monitoring probes"
+}
+
 test_only_config_is_never_quarantined() {
     root="$TMP_ROOT/only-config"
     mkdir -p "$root/configs" "$root/bad" "$root/wg"
@@ -513,6 +536,7 @@ test_copy_failure_does_not_quarantine_config
 test_transient_initial_health_failure_is_retried
 test_fastest_config_is_selected
 test_dead_tunnel_is_restarted_not_quarantined
+test_startup_probes_wait_longer_than_monitoring
 test_only_config_is_never_quarantined
 test_unrecoverable_config_is_replaced_after_restarts
 test_failed_health_check_is_quarantined_only_after_repeated_strikes

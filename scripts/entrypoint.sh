@@ -11,6 +11,9 @@ term_handler() {
 
 trap 'term_handler' SIGTERM
 
+# A marker left over from before `docker restart` must not pass for a live tunnel
+rm -f /tmp/active_config
+
 # Preserve the Docker gateway before awg-quick installs tunnel policy routes.
 IP4GATEWAY=$(ip route | awk '/default/ { print $3; exit }')
 IP6GATEWAY=$(ip -6 route | awk '/default/ { print $3; exit }')

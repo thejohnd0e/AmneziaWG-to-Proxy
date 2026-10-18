@@ -34,7 +34,8 @@ The script never registers from the real address: it needs a proxy or an active 
 | `FAST_START` | `1` | After a restart, try the last working config first (remembered in `bad_config/.last_active`) and skip the ranking if it works; `0` = always rank |
 | `RANK_BUDGET` | `0` | Seconds after which the startup ranking stops once one config works (`0` = the first working config wins); untested configs stay in `config/` for the next round |
 | `STARTUP_CHECKS` | `1` | Health checks per config at startup; a dead config costs one check, not `FAILOVER_FAILURES` |
-| `FAILOVER_TIMEOUT` | `8` | Max seconds per HTTPS probe |
+| `FAILOVER_TIMEOUT` | `8` | Max seconds per HTTPS probe of the monitoring loop; a lower value (e.g. `3`) notices a stalled tunnel sooner |
+| `STARTUP_TIMEOUT` | `8` | Max seconds per probe at startup, ranking and after a tunnel restart (the first handshake of a tunnel can be slow); independent of `FAILOVER_TIMEOUT` |
 | `SPEED_TEST` | `1` | Speed-test configs at startup and connect to the fastest |
 | `SPEED_TEST_URL` | *(first `HEALTH_URLS` entry)* | URL used for latency probes |
 

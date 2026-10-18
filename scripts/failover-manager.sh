@@ -20,6 +20,7 @@ INTERVAL="${FAILOVER_INTERVAL:-15}"
 FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
 CONFIG_POLL_INTERVAL="${CONFIG_POLL_INTERVAL:-30}"
 HEALTH_TIMEOUT="${FAILOVER_TIMEOUT:-8}"
+STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-8}"
 TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-2}"
 QUARANTINE_AFTER="${QUARANTINE_AFTER:-3}"
 RANK_BUDGET="${RANK_BUDGET:-0}"
@@ -112,14 +113,16 @@ start_tunnel() {
     return 1
 }
 
-# Retry a health check up to $2 times (default: the failure threshold).
+# Retry a health check up to $2 times (default: the failure threshold). Startup, ranking and
+# restart checks wait up to STARTUP_TIMEOUT per probe: the first handshake of a tunnel can be
+# slow. The monitoring loop keeps the shorter FAILOVER_TIMEOUT so a stall is noticed quickly.
 health_check_with_retries() {
     local config="$1"
     local max="${2:-$FAIL_THRESHOLD}"
     local attempt=1
 
     while [ "$attempt" -le "$max" ]; do
-        if "$CHECK_TUNNEL"; then
+        if FAILOVER_TIMEOUT="$STARTUP_TIMEOUT" "$CHECK_TUNNEL"; then
             return 0
         fi
         log "Health check failed ($attempt / $max) for $(basename "$config")"
