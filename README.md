@@ -82,7 +82,7 @@ Proxies are available at:
 docker compose exec amnezia-proxy /scripts/warp-gen.sh 10
 ```
 
-Each config is its own registration with its own key pair, generated locally. Inside the running container the registration goes through the active tunnel. If the API is blocked on your side (outside the container, or with the tunnel down), pass an optional proxy, e.g. `/scripts/warp-gen.sh 10 http://192.168.0.12:9220`; the configs themselves work from anywhere. Cloudflare answers 429 after about 10 registrations in a row: the script stops, try again later. Details in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Each config is its own registration with its own key pair, generated locally. Inside the running container the registration goes through the active tunnel. If the API is blocked on your side (outside the container, or with the tunnel down), pass an optional proxy, e.g. `/scripts/warp-gen.sh 10 http://192.168.0.12:9220`; the configs themselves work from anywhere. Every new config must complete a handshake before it is kept. Cloudflare answers 429 after about 10 registrations in a row: the script stops, try again later. Details in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Fastest Server Selection
 

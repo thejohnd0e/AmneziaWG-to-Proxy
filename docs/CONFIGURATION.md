@@ -19,6 +19,7 @@ The base image `ghcr.io/mainfrezzer/amnezia-bridge` builds `amneziawg-go` from u
 | `WARP_OUT` | `/configs` | Where the configs are written |
 | `WARP_ENDPOINT` | `162.159.192.7:4500` | Cloudflare endpoint written into the configs |
 | `WARP_PAUSE` | `3` | Seconds between registrations (rate limits) |
+| `WARP_VERIFY` | `15` | Seconds to wait for a handshake on a throwaway interface (no routes, the running tunnel is not touched); a config that gets none is discarded. `0` = do not check. A working WARP config answers within 1-6 s |
 
 The API is unofficial and may change or limit registrations from one address (HTTP 429 after about 10 in a row: the script stops, try again later). Do not generate hundreds at once.
 
