@@ -3,9 +3,11 @@
 # Usage: warp-gen.sh [count] [proxy]   (count default 1; proxy optional, e.g. http://192.168.0.12:9220)
 #        docker compose exec amnezia-proxy /scripts/warp-gen.sh 10
 #
-# The proxy is used only for the registration: the Cloudflare API is blocked by some ISPs,
-# so register through a tunnel that reaches it. The resulting configs work from anywhere.
-# WARP_PROXY=... does the same as the second argument.
+# The proxy is used only for the registration: the Cloudflare API is blocked by some ISPs.
+# Inside a running container the traffic already goes through the active tunnel, so no proxy
+# is needed there; outside it (or with the tunnel down) register through any tunnel that
+# reaches the API. The resulting configs work from anywhere. WARP_PROXY=... = second argument.
+# Cloudflare answers 429 after a few registrations in a row: the script then stops.
 #
 # Each config is a separate anonymous WARP registration with its own key pair; the
 # private key is generated here and never leaves this machine. Cloudflare's end is
@@ -45,7 +47,11 @@ while [ "$i" -le "$COUNT" ]; do
         '{key:$k, install_id:"", fcm_token:"", tos:$t, type:"Android", model:"PC", locale:"en_US", warp_enabled:true}')
     resp=$(curl -fsS --max-time 20 ${PROXY:+--proxy "$PROXY"} -X POST "$API" \
         -H 'Content-Type: application/json' -H 'User-Agent: okhttp/3.12.1' -H 'CF-Client-Version: a-6.10-2158' \
-        -d "$body" 2>&1) || { echo "registration $i/$COUNT failed: $resp" >&2; i=$((i + 1)); sleep "$PAUSE"; continue; }
+        -d "$body" 2>&1) || {
+        echo "registration $i/$COUNT failed: $resp" >&2
+        case "$resp" in *429*) echo "Cloudflare limits registrations from this address: try again later" >&2; break ;; esac
+        i=$((i + 1)); sleep "$PAUSE"; continue
+    }
 
     id=$(printf '%s' "$resp" | jq -r '.id // empty')
     peer=$(printf '%s' "$resp" | jq -r '.config.peers[0].public_key // empty')

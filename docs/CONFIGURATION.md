@@ -15,12 +15,12 @@ The base image `ghcr.io/mainfrezzer/amnezia-bridge` builds `amneziawg-go` from u
 | Variable / argument | Default | Description |
 |---|---|---|
 | `count` (1st argument) | `1` | Number of registrations |
-| `proxy` (2nd argument) or `WARP_PROXY` | *(none)* | Optional HTTP proxy used only for the registration; some ISPs block `api.cloudflareclient.com` |
+| `proxy` (2nd argument) or `WARP_PROXY` | *(none)* | Optional HTTP proxy used only for the registration; some ISPs block `api.cloudflareclient.com`. Not needed inside a running container (its traffic goes through the active tunnel) |
 | `WARP_OUT` | `/configs` | Where the configs are written |
 | `WARP_ENDPOINT` | `162.159.192.7:4500` | Cloudflare endpoint written into the configs |
 | `WARP_PAUSE` | `3` | Seconds between registrations (rate limits) |
 
-The API is unofficial and may change or limit registrations from one address: do not generate hundreds at once.
+The API is unofficial and may change or limit registrations from one address (HTTP 429 after about 10 in a row: the script stops, try again later). Do not generate hundreds at once.
 
 ## Failover Settings
 
