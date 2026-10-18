@@ -31,6 +31,10 @@ PROXY="${2:-${WARP_PROXY:-}}"
 
 die() { echo "error: $*" >&2; exit 1; }
 case "$COUNT" in ''|*[!0-9]*|0) die "count must be a positive number" ;; esac
+[ "$COUNT" -le 10 ] || die "at most 10 registrations per run (Cloudflare limits registrations per address)"
+# never register from the real address: the traffic must leave through a proxy or an active tunnel
+[ -n "$PROXY" ] || ip link show wg0 > /dev/null 2>&1 \
+    || die "no proxy given and no active tunnel (wg0): refusing to register from the real address"
 for c in awg curl jq; do command -v "$c" > /dev/null || die "$c is required"; done
 mkdir -p "$OUT" || die "cannot create $OUT"
 

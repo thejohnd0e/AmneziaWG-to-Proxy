@@ -21,7 +21,7 @@ The base image `ghcr.io/mainfrezzer/amnezia-bridge` builds `amneziawg-go` from u
 | `WARP_PAUSE` | `3` | Seconds between registrations (rate limits) |
 | `WARP_VERIFY` | `15` | Seconds to wait for a handshake on a throwaway interface (no routes, the running tunnel is not touched); a config that gets none is discarded. `0` = do not check. A working WARP config answers within 1-6 s |
 
-The API is unofficial and may change or limit registrations from one address (HTTP 429 after about 10 in a row: the script stops, try again later). Do not generate hundreds at once.
+The script never registers from the real address: it needs a proxy or an active `wg0` tunnel and refuses otherwise, and it creates at most 10 configs per run. The API is unofficial and may change or limit registrations from one address (HTTP 429 after about 10 in a row: the script stops, try again later). Do not generate hundreds at once.
 
 ## Failover Settings
 
