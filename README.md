@@ -141,6 +141,18 @@ Non-working configs are moved to `bad_config/` (after repeated failures, see `QU
 - [Security](docs/SECURITY.md) — security considerations
 - [Third Party](docs/THIRD_PARTY.md) — upstream dependencies
 
+## Related Projects
+
+These projects complement each other: the kits set up the servers, and the proxy containers bring a
+tunnel into your local network as a plain HTTP/SOCKS5 proxy.
+
+- [awg-vps-kit](https://github.com/thejohnd0e/awg-vps-kit) — one-shot **AmneziaWG (UDP)** server installer and
+  client manager. `awg-client show NAME` prints the client config you place in `./config/` here.
+- [xray-vps-kit](https://github.com/thejohnd0e/xray-vps-kit) — installer, client manager and updater for an
+  **Xray VLESS + REALITY + Vision** server over TCP, the companion of awg-vps-kit.
+- [VLESS-to-HTTP](https://github.com/thejohnd0e/VLESS-to-HTTP) — the same idea for **VLESS + REALITY**: a
+  container that turns a `vless://` link into an HTTP/SOCKS5 proxy.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
