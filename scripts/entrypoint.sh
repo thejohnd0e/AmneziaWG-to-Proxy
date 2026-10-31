@@ -14,6 +14,13 @@ trap 'term_handler' SIGTERM
 # A marker left over from before `docker restart` must not pass for a live tunnel
 rm -f /tmp/active_config
 
+# Arm the kill switch before anything can send traffic: only the tunnel, LAN and
+# the tunnel's own socket may leave the container, with or without wg0.
+if ! /killswitch.sh apply; then
+    echo "--- [entrypoint] Kill switch could not be armed, refusing to start ---"
+    exit 1
+fi
+
 # Preserve the Docker gateway before awg-quick installs tunnel policy routes.
 IP4GATEWAY=$(ip route | awk '/default/ { print $3; exit }')
 IP6GATEWAY=$(ip -6 route | awk '/default/ { print $3; exit }')
@@ -42,14 +49,6 @@ while [ ! -f /tmp/active_config ]; do
 done
 
 echo "--- [entrypoint] Active config established, starting proxies ---"
-
-# Local network bypass rules (from upstream)
-iptables -I OUTPUT -d 192.168.0.0/16 -j ACCEPT
-iptables -I OUTPUT -d 172.16.0.0/12 -j ACCEPT
-iptables -I OUTPUT -d 10.0.0.0/8 -j ACCEPT
-ip6tables -I OUTPUT -d fc00::/7 -j ACCEPT
-ip6tables -I OUTPUT -d fe80::/10 -j ACCEPT
-ip6tables -I OUTPUT -d ff00::/8 -j ACCEPT
 
 if [ -n "${LAN_NETWORK:-}" ] && [ -n "$IP4GATEWAY" ]; then
     printf '%s\n' "$LAN_NETWORK" | tr ',' '\n' | while IFS= read -r network; do

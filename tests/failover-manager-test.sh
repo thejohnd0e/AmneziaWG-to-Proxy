@@ -9,6 +9,17 @@ TUN_SETUP="$PROJECT_DIR/scripts/ensure-tun.sh"
 TMP_ROOT=$(mktemp -d)
 MANAGER_PID=""
 
+# Kill switch stand-in: logs its calls to $KS_LOG and fails with $KS_DNS_STATUS
+# (dns-open) or $KS_APPLY_STATUS (apply) when those are set
+KILLSWITCH="$TMP_ROOT/killswitch"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'echo "killswitch $*" >> "${KS_LOG:-/dev/null}"' \
+    'if [ "$1" = apply ]; then exit "${KS_APPLY_STATUS:-0}"; fi' \
+    'exit "${KS_DNS_STATUS:-0}"' > "$KILLSWITCH"
+chmod +x "$KILLSWITCH"
+export KILLSWITCH
+
 cleanup() {
     if [ -n "$MANAGER_PID" ]; then
         kill "$MANAGER_PID" 2>/dev/null || true
@@ -530,6 +541,75 @@ test_fast_start_falls_back_to_ranking() {
     echo "PASS: fast start falls back to ranking"
 }
 
+make_logging_commands() {
+    root="$1"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' 'echo "awg-quick $1" >> "$KS_LOG"' 'exit 0' > "$root/bin/awg-quick"
+    chmod +x "$root/bin/awg-quick"
+}
+
+test_tunnel_is_brought_up_inside_kill_switch_window() {
+    root="$TMP_ROOT/kill-switch-order"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    make_logging_commands "$root"
+
+    export KS_LOG="$root/calls.log"
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    stop_manager
+    unset KS_LOG
+
+    expected=$(printf '%s\n' 'killswitch dns-open' 'awg-quick up' 'killswitch apply')
+    [ "$(head -n 3 "$root/calls.log")" = "$expected" ] \
+        || fail "expected dns-open, awg-quick up, apply in that order, got: $(cat "$root/calls.log")"
+    echo "PASS: tunnel is brought up inside the kill switch window"
+}
+
+test_tunnel_is_not_started_when_kill_switch_cannot_be_armed() {
+    root="$TMP_ROOT/kill-switch-unarmed"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    make_logging_commands "$root"
+
+    export KS_LOG="$root/calls.log" KS_DNS_STATUS=1
+    run_restart_manager "$root"
+    wait "$MANAGER_PID"
+    status=$?
+    MANAGER_PID=""
+    unset KS_LOG KS_DNS_STATUS
+
+    [ "$status" -eq 1 ] || fail "expected the manager to stop with status 1, got $status"
+    if grep -q 'awg-quick up' "$root/calls.log" 2>/dev/null; then
+        fail "tunnel must not start while the kill switch is not armed"
+    fi
+    grep -q "Kill switch could not be armed" "$root/manager.log" \
+        || fail "expected the unarmed kill switch to be reported"
+    [ ! -f "$root/active" ] || fail "no config may become active without a kill switch"
+    echo "PASS: tunnel is not started when the kill switch cannot be armed"
+}
+
+test_tunnel_is_torn_down_when_kill_switch_cannot_be_finalized() {
+    root="$TMP_ROOT/kill-switch-finalize"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    make_logging_commands "$root"
+
+    export KS_LOG="$root/calls.log" KS_APPLY_STATUS=1
+    run_restart_manager "$root"
+    wait "$MANAGER_PID"
+    status=$?
+    MANAGER_PID=""
+    unset KS_LOG KS_APPLY_STATUS
+
+    [ "$status" -eq 1 ] || fail "expected the manager to stop with status 1, got $status"
+    expected=$(printf '%s\n' 'killswitch dns-open' 'awg-quick up' 'killswitch apply' 'awg-quick down')
+    [ "$(head -n 4 "$root/calls.log")" = "$expected" ] \
+        || fail "expected the tunnel to be taken down after a failed finalize, got: $(cat "$root/calls.log")"
+    [ ! -f "$root/active" ] || fail "no config may become active without a finalized kill switch"
+    echo "PASS: tunnel is taken down when the kill switch cannot be finalized"
+}
+
 test_missing_wg_directory_is_created
 test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
@@ -543,5 +623,8 @@ test_failed_health_check_is_quarantined_only_after_repeated_strikes
 test_ranking_stops_after_budget_once_a_config_works
 test_fast_start_uses_last_working_config
 test_fast_start_falls_back_to_ranking
+test_tunnel_is_brought_up_inside_kill_switch_window
+test_tunnel_is_not_started_when_kill_switch_cannot_be_armed
+test_tunnel_is_torn_down_when_kill_switch_cannot_be_finalized
 test_tun_device_is_created
 echo "All failover manager tests passed"

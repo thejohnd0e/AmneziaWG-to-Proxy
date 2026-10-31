@@ -14,6 +14,7 @@ FAILURE_FILE="${FAILURE_FILE:-/tmp/failure_count}"
 WG_CONF="${WG_CONF:-/etc/amnezia/amneziawg/wg0.conf}"
 CHECK_TUNNEL="${CHECK_TUNNEL:-/check-tunnel.sh}"
 TUN_SETUP="${TUN_SETUP:-/ensure-tun.sh}"
+KILLSWITCH="${KILLSWITCH:-/killswitch.sh}"
 AWG_LOG="${AWG_LOG:-/tmp/awg-quick.log}"
 
 INTERVAL="${FAILOVER_INTERVAL:-15}"
@@ -92,8 +93,12 @@ clear_strikes() {
 
 # --- Bring up tunnel with a config ---
 
+# The kill switch stays armed whether or not wg0 exists: only the tunnel, LAN and
+# the tunnel's own socket may leave. DNS is opened for the bring-up window only,
+# because awg-quick may need to resolve an Endpoint host name.
 start_tunnel() {
     local config_file="$1"
+    local up_status=0
     if ! cp "$config_file" "$WG_CONF"; then
         log "ERROR: Could not stage $(basename "$config_file") at $WG_CONF"
         return 2
@@ -104,7 +109,17 @@ start_tunnel() {
         log "ERROR: Could not prepare $(basename "$config_file") at $WG_CONF"
         return 2
     fi
-    if awg-quick up wg0 > "$AWG_LOG" 2>&1; then
+    if ! "$KILLSWITCH" dns-open; then
+        log "ERROR: Kill switch could not be armed, not starting the tunnel"
+        return 2
+    fi
+    awg-quick up wg0 > "$AWG_LOG" 2>&1 || up_status=1
+    if ! "$KILLSWITCH" apply; then
+        log "ERROR: Kill switch could not be finalized, taking the tunnel down"
+        awg-quick down wg0 > /dev/null 2>&1
+        return 2
+    fi
+    if [ "$up_status" -eq 0 ]; then
         return 0
     fi
 

@@ -109,9 +109,9 @@ When no working configs remain:
 - The container becomes `unhealthy`
 - The failover manager periodically scans `config/` for new files
 - New configs are automatically picked up and tested
-- The proxy ports will not serve traffic until a working config is found
+- The proxy ports still accept connections, but every outbound connection is rejected by the kill switch (`scripts/killswitch.sh`) until a working config is found
 
-This is a **fail-closed** design: traffic never leaks outside the VPN.
+This is a **fail-closed** design: no traffic leaves the container except through the tunnel, LAN ranges and the tunnel's own socket.
 
 ## State Diagram
 

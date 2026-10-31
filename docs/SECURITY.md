@@ -38,11 +38,27 @@ PROXY_BIND_ADDRESS=127.0.0.1
 
 ## Fail-Closed Design
 
-When all configs fail, the container becomes `unhealthy` and stops serving proxy traffic.
-This is intentional: traffic should never flow outside the VPN tunnel.
+The container runs an outbound kill switch (`scripts/killswitch.sh`, chain `AWG_KILLSWITCH` in `OUTPUT`).
+It is armed at container start, before any proxy or tunnel process runs, and it stays in place
+whether or not `wg0` exists. Only these may leave the container:
 
-**Do not** use `DISABLE_TUNNEL_MODE` unless you explicitly want split tunneling,
-as this allows some traffic to bypass the VPN.
+- loopback;
+- the `wg0` interface;
+- the tunnel's own UDP socket, matched by its fwmark (the encrypted tunnel traffic to the endpoint);
+- LAN ranges from `LAN_NETWORK` / `LAN_NETWORK6` and the built-in private ranges;
+- DNS to the resolvers in `resolv.conf`, only while `awg-quick up` runs (it may need to resolve an `Endpoint` host name).
+
+Everything else is rejected. If `wg0` is missing or down, traffic does not fall back to the default route on `eth0`.
+Each rule update is one `iptables-restore` transaction, so there is no moment with an open firewall.
+The proxies keep listening, but their outbound connections fail while no tunnel is up.
+
+If the kill switch cannot be armed or finalized, the failover manager does not start the tunnel.
+
+**Do not** use `DISABLE_TUNNEL_MODE` (it has no effect in the current code). Split tunneling
+is not supported; LAN bypass is the only exception to the VPN path.
+
+Verification: `sudo sh tests/killswitch-test.sh` (network namespace, real iptables) and
+`sh tests/failover-manager-test.sh`.
 
 ## GeoIP Endpoint Privacy
 

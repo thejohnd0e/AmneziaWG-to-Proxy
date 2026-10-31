@@ -1,0 +1,112 @@
+#!/bin/sh
+# killswitch.sh — Outbound kill switch for the container
+# Owns the AWG_KILLSWITCH chain, hooked into OUTPUT. Only loopback, the tunnel
+# interface, LAN ranges and the tunnel's own UDP socket (matched by its fwmark)
+# may leave the container. Everything else is rejected, so when wg0 is missing
+# or down, traffic cannot fall back to the default route on eth0.
+#
+#   killswitch.sh apply     rebuild the chain for the current tunnel state
+#   killswitch.sh dns-open  same, and also allow DNS to the resolvers in
+#                           resolv.conf; used only while awg-quick resolves an
+#                           Endpoint host name
+#
+# Each rebuild is a single iptables-restore transaction, so the chain is never
+# seen empty while it is being replaced.
+
+CHAIN="${KS_CHAIN:-AWG_KILLSWITCH}"
+TUNNEL_IF="${TUNNEL_IF:-wg0}"
+RESOLV_CONF="${RESOLV_CONF:-/etc/resolv.conf}"
+
+# Always allowed, in addition to LAN_NETWORK and LAN_NETWORK6
+LAN4_BASE="192.168.0.0/16 172.16.0.0/12 10.0.0.0/8"
+LAN6_BASE="fc00::/7 fe80::/10 ff00::/8"
+
+log() {
+    echo "--- [killswitch] $1 ---" >&2
+}
+
+# LAN networks of one family (4 or 6), space-separated
+lan_networks() {
+    for net in $LAN4_BASE $LAN6_BASE $(echo "${LAN_NETWORK:-} ${LAN_NETWORK6:-}" | tr ',' ' '); do
+        case "$net" in
+            *:*) [ "$1" = 6 ] && echo "$net" ;;
+            *)   [ "$1" = 4 ] && echo "$net" ;;
+        esac
+    done
+}
+
+# Resolvers of one family (4 or 6) from resolv.conf
+resolvers() {
+    awk -v six="$1" '$1 == "nameserver" && (($2 ~ /:/) == (six == "6")) { print $2 }' "$RESOLV_CONF" 2>/dev/null
+}
+
+# fwmark of the tunnel's sockets; empty while the tunnel is down
+tunnel_mark() {
+    m=$(awg show "$TUNNEL_IF" fwmark 2>/dev/null)
+    case "$m" in
+        '') ;;
+        *) printf '%s\n' "$m" | grep -Eq '^(0[xX][[:xdigit:]]+|[0-9]+)$' && echo "$m" ;;
+    esac
+}
+
+ruleset() {
+    fam="$1"
+    dns="$2"
+    if [ "$fam" = 6 ]; then
+        reject=icmp6-adm-prohibited
+    else
+        reject=icmp-admin-prohibited
+    fi
+
+    echo "*filter"
+    echo ":$CHAIN - [0:0]"
+    echo "-F $CHAIN"
+    echo "-A $CHAIN -o lo -j ACCEPT"
+    echo "-A $CHAIN -o $TUNNEL_IF -j ACCEPT"
+    mark=$(tunnel_mark)
+    if [ -n "$mark" ]; then
+        echo "-A $CHAIN -p udp -m mark --mark $mark -j ACCEPT"
+    fi
+    for net in $(lan_networks "$fam"); do
+        echo "-A $CHAIN -d $net -j ACCEPT"
+    done
+    if [ "$dns" = 1 ]; then
+        for ns in $(resolvers "$fam"); do
+            echo "-A $CHAIN -p udp -d $ns --dport 53 -j ACCEPT"
+            echo "-A $CHAIN -p tcp -d $ns --dport 53 -j ACCEPT"
+        done
+    fi
+    echo "-A $CHAIN -j REJECT --reject-with $reject"
+    echo "COMMIT"
+}
+
+apply_family() {
+    bin=iptables
+    if [ "$1" = 6 ]; then
+        bin=ip6tables
+    fi
+    ruleset "$1" "$2" | "$bin-restore" --noflush || return 1
+    "$bin" -C OUTPUT -j "$CHAIN" 2>/dev/null || "$bin" -I OUTPUT 1 -j "$CHAIN" || return 1
+}
+
+case "${1:-}" in
+    apply) DNS=0 ;;
+    dns-open) DNS=1 ;;
+    *)
+        echo "usage: killswitch.sh apply|dns-open" >&2
+        exit 2
+        ;;
+esac
+
+if ! apply_family 4 "$DNS"; then
+    log "ERROR: IPv4 kill switch could not be applied"
+    exit 1
+fi
+
+if ! apply_family 6 "$DNS"; then
+    if [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+        log "ERROR: IPv6 kill switch could not be applied, but an IPv6 default route exists"
+        exit 1
+    fi
+    log "WARNING: IPv6 kill switch not applied (no IPv6 default route to leak through)"
+fi

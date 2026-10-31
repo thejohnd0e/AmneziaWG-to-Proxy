@@ -5,10 +5,11 @@ RUN apk add --no-cache curl jq
 COPY scripts /scripts
 COPY scripts/check-tunnel.sh /check-tunnel.sh
 COPY scripts/ensure-tun.sh /ensure-tun.sh
+COPY scripts/killswitch.sh /killswitch.sh
 COPY scripts/failover-manager.sh /failover-manager.sh
 COPY scripts/entrypoint.sh /entrypoint.sh
 
-RUN chmod +x /scripts/*.sh /check-tunnel.sh /ensure-tun.sh /failover-manager.sh /entrypoint.sh \
+RUN chmod +x /scripts/*.sh /check-tunnel.sh /ensure-tun.sh /killswitch.sh /failover-manager.sh /entrypoint.sh \
     && mkdir -p /etc/amnezia/amneziawg
 
 ENTRYPOINT ["/entrypoint.sh"]
