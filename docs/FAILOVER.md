@@ -12,7 +12,7 @@ It continuously monitors the active tunnel and switches to the next config when 
 ```
 1. Speed-test every *.conf in /configs:
    a. Copy to wg0.conf, awg-quick up wg0
-   b. Health check (HTTPS via wg0); on failure after retries → a strike (bad_config/ after QUARANTINE_AFTER strikes)
+   b. Health check (HTTPS via wg0); record a pending failure if it does not pass
    c. Measure latency (best of 3 probes through wg0)
    d. awg-quick down wg0
 2. Rank working configs by latency, fastest first
@@ -30,8 +30,10 @@ It continuously monitors the active tunnel and switches to the next config when 
         config/ and retry later (a server-side outage never leaves the
         container without a config)
       - Otherwise: awg-quick down wg0
-      - Give the failed config a strike; after QUARANTINE_AFTER strikes (kept
-        across container restarts in bad_config/.strikes/) move it to bad_config/
+       - Keep failed candidates pending until another config is actually active;
+         then apply one strike to each failed candidate. After QUARANTINE_AFTER
+         committed strikes (kept across container restarts in bad_config/.strikes/)
+         move the candidate to bad_config/
       - Pick the next config from the ranked list
       - If the list is exhausted → re-rank the remaining configs
       - If no configs left → unhealthy, periodic retry
@@ -44,9 +46,15 @@ At startup the manager measures every config before connecting:
 - Each config is brought up and checked for connectivity.
 - Latency is the **best of 3** HTTPS probes through `wg0`, with DNS lookup
   time subtracted so configs are compared by server latency, not resolver speed.
-- Configs that cannot start are moved to `bad_config/` at once. Configs that
-  stay unreachable get a strike and are moved after `QUARANTINE_AFTER` strikes,
-  so one network blip does not cost a working config.
+- A failed `awg-quick up` or health probe is inconclusive: it may be a bad
+  candidate, DNS failure or a host/network outage. Failed candidates are kept
+  pending until a replacement is actually active. If no candidate becomes
+  healthy, config files and existing strike counts are preserved for the next
+  retry; this deliberately avoids diagnosing the cause from failed probes alone.
+- Once a replacement is active, each failed candidate from that selection cycle
+  receives one strike. After `QUARANTINE_AFTER` committed strikes, it is moved to
+  `bad_config/`. A config's existing strikes are cleared only after it remains
+  healthy for `FAILOVER_FAILURES` consecutive monitoring checks.
 - Fast start (`FAST_START=1`): the config that was active last is remembered in
   `bad_config/.last_active`. After a container restart it is tried first and, if
   it passes the health check, the ranking is skipped entirely (the proxy is up

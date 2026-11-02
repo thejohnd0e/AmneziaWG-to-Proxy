@@ -198,7 +198,7 @@ test_transient_initial_health_failure_is_retried() {
     TUN_SETUP="$TUN_SETUP" \
     TUN_DEVICE=/dev/null \
     FAILOVER_FAILURES=3 \
-    FAILOVER_INTERVAL=0.1 \
+    FAILOVER_INTERVAL="${TEST_FAILOVER_INTERVAL:-0.1}" \
         sh "$MANAGER" > "$root/manager.log" 2>&1 &
     MANAGER_PID=$!
 
@@ -303,6 +303,7 @@ run_restart_manager() {
     BAD_DIR="$root/bad" \
     ACTIVE_MARKER="$root/active" \
     FAILURE_FILE="$root/failures" \
+    PENDING_FAILURE_FILE="$root/pending-failures" \
     WG_CONF="$root/wg/wg0.conf" \
     CHECK_TUNNEL="$root/bin/check-tunnel" \
     UP_COUNT="$root/up-count" \
@@ -610,6 +611,103 @@ test_tunnel_is_torn_down_when_kill_switch_cannot_be_finalized() {
     echo "PASS: tunnel is taken down when the kill switch cannot be finalized"
 }
 
+test_all_awg_start_failures_preserve_every_config_and_strike() {
+    root="$TMP_ROOT/start-failure-outage"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin" "$root/bad/.strikes"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = b' > "$root/configs/b.conf"
+    printf '%s\n' '2' > "$root/bad/.strikes/a.conf"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' '[ "$1" = up ] && exit 1' 'exit 0' > "$root/bin/awg-quick"
+    chmod +x "$root/bin/awg-quick"
+
+    SPEED_TEST=1 QUARANTINE_AFTER=3 FAST_START=0 run_restart_manager "$root"
+    sleep 0.5
+    stop_manager
+
+    assert_file_exists "$root/configs/a.conf"
+    assert_file_exists "$root/configs/b.conf"
+    assert_no_configs "$root/bad"
+    [ "$(cat "$root/bad/.strikes/a.conf")" = 2 ] \
+        || fail "an all-start-failure round must not add strikes"
+    grep -q "No working configs found" "$root/manager.log" \
+        || fail "expected the manager to report that no candidate became active"
+    echo "PASS: all awg-quick failures preserve configs and pending strikes"
+}
+
+test_all_health_failures_preserve_existing_strikes() {
+    root="$TMP_ROOT/health-failure-outage"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin" "$root/bad/.strikes"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = b' > "$root/configs/b.conf"
+    printf '%s\n' '2' > "$root/bad/.strikes/a.conf"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' 'exit 1' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/check-tunnel"
+
+    SPEED_TEST=1 QUARANTINE_AFTER=3 FAST_START=0 STARTUP_CHECKS=1 run_restart_manager "$root"
+    sleep 0.5
+    stop_manager
+
+    assert_file_exists "$root/configs/a.conf"
+    assert_file_exists "$root/configs/b.conf"
+    assert_no_configs "$root/bad"
+    [ "$(cat "$root/bad/.strikes/a.conf")" = 2 ] \
+        || fail "a round with no healthy candidate must not add strikes"
+    grep -q "No config became healthy" "$root/manager.log" \
+        || fail "expected all unhealthy candidates to be reported"
+    echo "PASS: all health failures preserve configs and existing strikes"
+}
+
+test_pending_strike_commits_only_after_replacement_is_active() {
+    root="$TMP_ROOT/pending-strike-commit"
+    mkdir -p "$root/configs" "$root/bad/.strikes" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = b' > "$root/configs/b.conf"
+    printf '%s\n' '2' > "$root/bad/.strikes/a.conf"
+    make_success_commands "$root/bin"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        '[ "$1" = up ] || exit 0' \
+        'grep -q "PrivateKey = a" "$WG_CONF" && exit 1' \
+        'exit 0' > "$root/bin/awg-quick"
+    chmod +x "$root/bin/awg-quick"
+
+    SPEED_TEST=1 QUARANTINE_AFTER=3 FAST_START=0 run_restart_manager "$root"
+    wait_for_file "$root/active"
+
+    grep -q 'b.conf' "$root/active" || fail "expected healthy replacement b to become active"
+    assert_file_exists "$root/bad/a.conf"
+    assert_file_exists "$root/configs/b.conf"
+
+    stop_manager
+    echo "PASS: pending strike commits after replacement activation"
+}
+
+test_existing_strikes_clear_only_after_stable_health() {
+    root="$TMP_ROOT/stable-strike-clear"
+    mkdir -p "$root/configs" "$root/bad/.strikes" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '2' > "$root/bad/.strikes/a.conf"
+    make_success_commands "$root/bin"
+
+    SPEED_TEST=1 FAST_START=0 QUARANTINE_AFTER=3 TEST_FAILOVER_INTERVAL=1 run_restart_manager "$root"
+    wait_for_file "$root/active"
+    [ "$(cat "$root/bad/.strikes/a.conf" 2>/dev/null)" = 2 ] \
+        || fail "a successful startup probe alone must not clear historical strikes"
+
+    attempts=0
+    while [ -f "$root/bad/.strikes/a.conf" ] && [ "$attempts" -lt 50 ]; do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+    [ ! -f "$root/bad/.strikes/a.conf" ] \
+        || fail "strikes should clear after FAILOVER_FAILURES stable monitoring checks"
+
+    stop_manager
+    echo "PASS: existing strikes clear only after stable health"
+}
+
 test_missing_wg_directory_is_created
 test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
@@ -626,5 +724,9 @@ test_fast_start_falls_back_to_ranking
 test_tunnel_is_brought_up_inside_kill_switch_window
 test_tunnel_is_not_started_when_kill_switch_cannot_be_armed
 test_tunnel_is_torn_down_when_kill_switch_cannot_be_finalized
+test_all_awg_start_failures_preserve_every_config_and_strike
+test_all_health_failures_preserve_existing_strikes
+test_pending_strike_commits_only_after_replacement_is_active
+test_existing_strikes_clear_only_after_stable_health
 test_tun_device_is_created
 echo "All failover manager tests passed"

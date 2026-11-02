@@ -29,6 +29,7 @@ STARTUP_CHECKS="${STARTUP_CHECKS:-1}"
 STRIKE_DIR="${STRIKE_DIR:-$BAD_DIR/.strikes}"
 FAST_START="${FAST_START:-1}"
 LAST_ACTIVE_FILE="${LAST_ACTIVE_FILE:-$BAD_DIR/.last_active}"
+PENDING_FAILURE_FILE="${PENDING_FAILURE_FILE:-/tmp/pending_failures}"
 SPEED_TEST="${SPEED_TEST:-1}"
 SPEED_TEST_URL="${SPEED_TEST_URL:-}"
 
@@ -89,6 +90,29 @@ strike_config() {
 
 clear_strikes() {
     rm -f "$STRIKE_DIR/$(basename "$1")"
+}
+
+record_pending_failure() {
+    local config="$1"
+    [ -f "$config" ] || return 0
+    grep -Fqx "$config" "$PENDING_FAILURE_FILE" 2>/dev/null && return 0
+    printf '%s\n' "$config" >> "$PENDING_FAILURE_FILE"
+}
+
+commit_pending_failures() {
+    local active="$1"
+    local config
+    [ -f "$PENDING_FAILURE_FILE" ] || return 0
+    while IFS= read -r config; do
+        [ -n "$config" ] || continue
+        [ "$config" = "$active" ] && continue
+        [ -f "$config" ] && strike_config "$config"
+    done < "$PENDING_FAILURE_FILE"
+    : > "$PENDING_FAILURE_FILE"
+}
+
+discard_pending_failures() {
+    : > "$PENDING_FAILURE_FILE"
 }
 
 # --- Bring up tunnel with a config ---
@@ -200,7 +224,8 @@ rank_configs() {
     local results=""
     local config status ms
     local started=$(date +%s)
-    for config in $configs; do
+    while IFS= read -r config; do
+        [ -n "$config" ] || continue
         if [ -n "$results" ] && [ $(($(date +%s) - started)) -ge "$RANK_BUDGET" ]; then
             log "Ranking budget (${RANK_BUDGET}s) reached: using what is tested, the rest is tried later"
             break
@@ -216,24 +241,33 @@ rank_configs() {
         fi
         if [ "$status" -ne 0 ]; then
             log "awg-quick failed for $(basename "$config")"
-            move_to_bad "$config"
+            awg-quick down wg0 > /dev/null 2>&1
+            record_pending_failure "$config"
             continue
         fi
 
         if ! health_check_with_retries "$config" "$STARTUP_CHECKS"; then
             log "No connectivity for $(basename "$config")"
             awg-quick down wg0 > /dev/null 2>&1
-            strike_config "$config"
+            record_pending_failure "$config"
             continue
         fi
 
-        clear_strikes "$config"
         ms=$(measure_latency)
         log "Speed test: $(basename "$config") = ${ms:-?} ms"
+        ms=${ms:-999999}
         results="${results}${ms}\t${config}\n"
 
         awg-quick down wg0 > /dev/null 2>&1
-    done
+    done <<EOF
+$configs
+EOF
+
+    if [ -n "$results" ]; then
+        : # The main loop commits these penalties only after a candidate activates.
+    else
+        log "No config became healthy; preserving configs and strike counts"
+    fi
 
     printf '%b' "$results" | sort -n
 }
@@ -256,6 +290,7 @@ if ! "$TUN_SETUP"; then
 fi
 
 echo "0" > "$FAILURE_FILE"
+discard_pending_failures
 
 log "Failover manager started"
 log "Config dir: $CONFIG_DIR | Bad dir: $BAD_DIR"
@@ -308,25 +343,28 @@ while true; do
         log "Trying config: $(basename "$CURRENT_CONFIG")"
         start_tunnel "$CURRENT_CONFIG"
         START_STATUS=$?
-        if [ "$START_STATUS" -eq 2 ]; then
+            if [ "$START_STATUS" -eq 2 ]; then
             log "Fatal staging error; leaving $(basename "$CURRENT_CONFIG") in $CONFIG_DIR"
             exit 1
         fi
         if [ "$START_STATUS" -ne 0 ]; then
             log "awg-quick failed for $(basename "$CURRENT_CONFIG")"
-            move_to_bad "$CURRENT_CONFIG"
+            awg-quick down wg0 > /dev/null 2>&1
+            record_pending_failure "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
             continue
         fi
 
         if ! health_check_with_retries "$CURRENT_CONFIG" "$STARTUP_CHECKS"; then
             awg-quick down wg0 > /dev/null 2>&1
-            strike_config "$CURRENT_CONFIG"
+            record_pending_failure "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
             continue
         fi
 
-        clear_strikes "$CURRENT_CONFIG"
+        commit_pending_failures "$CURRENT_CONFIG"
+        SKIP_CONFIG=""
+        STABLE_COUNT=0
         log "Config $(basename "$CURRENT_CONFIG") is ACTIVE"
         echo "$CURRENT_CONFIG" > "$ACTIVE_MARKER"
         basename "$CURRENT_CONFIG" > "$LAST_ACTIVE_FILE" 2>/dev/null || true
@@ -339,8 +377,14 @@ while true; do
     "$CHECK_TUNNEL"
     if [ $? -eq 0 ]; then
         echo "0" > "$FAILURE_FILE"
+        STABLE_COUNT=$((STABLE_COUNT + 1))
+        if [ "$STABLE_COUNT" -ge "$FAIL_THRESHOLD" ]; then
+            clear_strikes "$CURRENT_CONFIG"
+            STABLE_COUNT=0
+        fi
         continue
     fi
+    STABLE_COUNT=0
 
     # Health check failed
     FAIL_COUNT=$(cat "$FAILURE_FILE")
@@ -382,8 +426,10 @@ while true; do
     # Otherwise switch config
     log "Switching config..."
     awg-quick down wg0 > /dev/null 2>&1
-    strike_config "$CURRENT_CONFIG"
+    record_pending_failure "$CURRENT_CONFIG"
+    SKIP_CONFIG="$CURRENT_CONFIG"
     CURRENT_CONFIG=""
+    rm -f "$ACTIVE_MARKER"
     echo "0" > "$FAILURE_FILE"
 
     # Small pause before trying next config
