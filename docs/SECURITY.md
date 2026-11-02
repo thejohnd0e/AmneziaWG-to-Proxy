@@ -48,10 +48,15 @@ whether or not `wg0` exists. Only these may leave the container:
 - loopback;
 - the `wg0` interface;
 - the tunnel's own UDP socket, matched by its fwmark (the encrypted tunnel traffic to the endpoint);
-- LAN ranges from `LAN_NETWORK` / `LAN_NETWORK6` and the built-in private ranges;
+- explicitly configured destination CIDRs from `LAN_NETWORK` / `LAN_NETWORK6`;
+- TCP replies for established connections accepted on the proxy listener ports;
 - DNS to the resolvers in `resolv.conf`, only while `awg-quick up` runs (it may need to resolve an `Endpoint` host name).
 
-Everything else is rejected. If `wg0` is missing or down, traffic does not fall back to the default route on `eth0`.
+Private, link-local and multicast destinations are rejected unless an exact
+destination CIDR is explicitly allowed. This includes the common cloud metadata
+address range `169.254.0.0/16`. Everything else is rejected unless it uses the
+tunnel or the tunnel's marked UDP socket. If `wg0` is missing or down, traffic
+does not fall back to the default route on `eth0`.
 Each rule update is one `iptables-restore` transaction, so there is no moment with an open firewall.
 The proxies keep listening, but their outbound connections fail while no tunnel is up.
 

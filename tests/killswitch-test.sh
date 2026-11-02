@@ -15,6 +15,7 @@ PROJECT_DIR=$(dirname "$TEST_DIR")
 KILLSWITCH="${KILLSWITCH_SCRIPT:-$PROJECT_DIR/scripts/killswitch.sh}"
 CHAIN=AWG_KILLSWITCH
 NS="ks-test-$$"
+CLIENT_NS="${NS}-client"
 TMP_ROOT=$(mktemp -d)
 N="ip netns exec $NS"
 
@@ -25,6 +26,7 @@ fail() {
 
 cleanup() {
     ip netns del "$NS" 2>/dev/null || true
+    ip netns del "$CLIENT_NS" 2>/dev/null || true
     rm -rf "$TMP_ROOT"
 }
 trap cleanup EXIT INT TERM
@@ -49,12 +51,21 @@ printf '%s\n' 'nameserver 192.0.2.53' > "$TMP_ROOT/resolv.conf"
 export RESOLV_CONF="$TMP_ROOT/resolv.conf"
 
 ip netns add "$NS" || fail "cannot create network namespace $NS"
+ip netns add "$CLIENT_NS" || fail "cannot create client namespace $CLIENT_NS"
 $N ip link set lo up
 $N ip link add eth0 type dummy
 $N ip addr add 172.30.0.2/24 dev eth0
 $N ip link set eth0 up
 $N ip neigh replace 172.30.0.1 lladdr 02:00:00:00:00:01 nud permanent dev eth0
 $N ip route add default via 172.30.0.1 dev eth0
+ip link add ks-proxy type veth peer name ks-client
+ip link set ks-proxy netns "$NS"
+ip link set ks-client netns "$CLIENT_NS"
+$N ip addr add 10.200.0.1/24 dev ks-proxy
+$N ip link set ks-proxy up
+ip netns exec "$CLIENT_NS" ip addr add 10.200.0.2/24 dev ks-client
+ip netns exec "$CLIENT_NS" ip link set lo up
+ip netns exec "$CLIENT_NS" ip link set ks-client up
 
 # Mirrors what awg-quick sets up: wg0, table 51820 and the two policy rules
 tunnel_up() {
@@ -78,7 +89,7 @@ tx() {
 
 reject_count() {
     $N iptables -L "$CHAIN" -v -n -x 2>/dev/null \
-        | awk '/REJECT/ { print $1; found = 1 } END { if (!found) print 0 }'
+        | awk '/REJECT/ { sum += $1; found = 1 } END { print found ? sum : 0 }'
 }
 
 # measure COMMAND...: runs the command and sets PROBE_ETH0, PROBE_WG0 and
@@ -128,15 +139,54 @@ test_no_tunnel_blocks_public_traffic() {
 }
 
 test_no_tunnel_keeps_lan_access() {
+    LAN_NETWORK=192.168.0.0/24 $N sh "$KILLSWITCH" apply
     probe 192.168.0.12
     [ "$PROBE_ETH0" -ge 1 ] || fail "LAN traffic was not sent via eth0 with no tunnel"
     [ "$PROBE_REJECT" = 0 ] || fail "LAN traffic was rejected by the kill switch"
+    apply
     echo "PASS: LAN access works with no tunnel"
+}
+
+test_private_and_metadata_destinations_block_by_default() {
+    for target in 10.0.0.1 172.16.0.1 192.168.0.12 169.254.169.254; do
+        probe "$target"
+        [ "$PROBE_ETH0" = 0 ] || fail "private destination $target left via eth0"
+        [ "$PROBE_REJECT" -ge 1 ] || fail "private destination $target was not rejected"
+    done
+    echo "PASS: private and metadata destinations are denied by default"
+}
+
+test_proxy_client_receives_tcp_reply_without_lan_egress_allowance() {
+    cat > "$TMP_ROOT/proxy-server.py" <<'EOF'
+import socket
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("10.200.0.1", 1080))
+s.listen(1)
+c, _ = s.accept()
+c.recv(16)
+c.sendall(b"proxy-reply")
+c.close()
+s.close()
+EOF
+    $N python3 "$TMP_ROOT/proxy-server.py" > /dev/null 2>&1 &
+    server_pid=$!
+    sleep 0.1
+    response=$(ip netns exec "$CLIENT_NS" python3 -c \
+        'import socket; s=socket.create_connection(("10.200.0.1",1080),2); s.sendall(b"request"); print(s.recv(32).decode()); s.close()') \
+        || fail "proxy client TCP connection failed"
+    wait "$server_pid" || fail "proxy listener did not complete"
+    [ "$response" = proxy-reply ] || fail "client did not receive the proxy TCP response"
+    echo "PASS: inbound proxy client receives TCP response"
 }
 
 test_tunnel_carries_public_traffic() {
     tunnel_up
     apply
+    probe 169.254.169.254
+    [ "$PROBE_ETH0" = 0 ] && [ "$PROBE_WG0" = 0 ] \
+        || fail "metadata traffic escaped via the tunnel or eth0"
+    [ "$PROBE_REJECT" -ge 1 ] || fail "metadata traffic was not rejected while tunnel was up"
     probe 203.0.113.10
     [ "$PROBE_WG0" -ge 1 ] || fail "public traffic did not use wg0 while the tunnel was up"
     [ "$PROBE_ETH0" = 0 ] || fail "public traffic left via eth0 while the tunnel was up (+$PROBE_ETH0)"
@@ -162,8 +212,10 @@ test_tunnel_down_blocks_public_traffic() {
 }
 
 test_tunnel_down_keeps_lan_access() {
+    LAN_NETWORK=192.168.0.0/24 $N sh "$KILLSWITCH" apply
     probe 192.168.0.12
     [ "$PROBE_ETH0" -ge 1 ] || fail "LAN traffic was blocked after wg0 went down"
+    apply
     echo "PASS: tunnel down keeps LAN access"
 }
 
@@ -196,7 +248,9 @@ test_dns_window_opens_and_closes() {
 }
 
 test_no_tunnel_blocks_public_traffic
+test_private_and_metadata_destinations_block_by_default
 test_no_tunnel_keeps_lan_access
+test_proxy_client_receives_tcp_reply_without_lan_egress_allowance
 test_tunnel_carries_public_traffic
 test_tunnel_socket_mark_reaches_endpoint
 test_tunnel_down_blocks_public_traffic

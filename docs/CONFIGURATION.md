@@ -69,9 +69,18 @@ The same resolvers are used by the config checker.
 
 | Variable | Default | Description |
 |---|---|---|
-| `LAN_NETWORK` | `192.168.0.0/16,10.0.0.0/8,172.16.0.0/12,172.17.0.0/16,169.254.0.0/16` | IPv4 ranges to bypass the tunnel |
-| `LAN_NETWORK6` | `fd00::/8,fe80::/10` | IPv6 ranges to bypass the tunnel |
+| `LAN_NETWORK` | *(empty)* | Exact IPv4 destination CIDRs the proxy may reach outside the tunnel |
+| `LAN_NETWORK6` | *(empty)* | Exact IPv6 destination CIDRs the proxy may reach outside the tunnel |
+| `PROXY_CLIENT_NETWORKS` | *(empty)* | IPv4 client CIDRs that need return routes; does not allow new proxy connections to those clients |
+| `PROXY_CLIENT_NETWORKS6` | *(empty)* | IPv6 client CIDRs that need return routes; does not allow new proxy connections to those clients |
 | `DISABLE_TUNNEL_MODE` | *(empty)* | Set to any value to disable full-tunnel enforcement |
+
+Private and link-local destinations (including `169.254.0.0/16`) are blocked by
+default, even when the tunnel is up. Add only a narrow `LAN_NETWORK` CIDR for a
+destination the proxy genuinely needs. Such destinations bypass the VPN. The
+`PROXY_CLIENT_NETWORKS*` lists create return routes only; replies to established
+TCP connections on the SOCKS/HTTP listener ports are allowed, but they do not
+authorize new proxy requests to the client network.
 
 ## Upstream Settings
 
@@ -94,8 +103,14 @@ SPEED_TEST=1
 DNS_PRIMARY=1.1.1.1
 DNS_SECONDARY=1.0.0.1
 PROXY_BIND_ADDRESS=127.0.0.1
-LAN_NETWORK=192.168.0.0/16,10.0.0.0/8,172.16.0.0/12
+LAN_NETWORK=192.168.1.0/24
+PROXY_CLIENT_NETWORKS=192.168.1.0/24
 ```
+
+The example CIDR is intentionally narrow; keep `LAN_NETWORK` empty unless the
+proxy must initiate connections to a specific LAN destination. Set
+`PROXY_CLIENT_NETWORKS` only when clients outside Docker's directly connected
+subnet need an explicit return route.
 
 ## Changing Settings
 

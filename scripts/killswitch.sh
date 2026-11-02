@@ -17,22 +17,26 @@ CHAIN="${KS_CHAIN:-AWG_KILLSWITCH}"
 TUNNEL_IF="${TUNNEL_IF:-wg0}"
 RESOLV_CONF="${RESOLV_CONF:-/etc/resolv.conf}"
 
-# Always allowed, in addition to LAN_NETWORK and LAN_NETWORK6
-LAN4_BASE="192.168.0.0/16 172.16.0.0/12 10.0.0.0/8"
-LAN6_BASE="fc00::/7 fe80::/10 ff00::/8"
-
 log() {
     echo "--- [killswitch] $1 ---" >&2
 }
 
 # LAN networks of one family (4 or 6), space-separated
 lan_networks() {
-    for net in $LAN4_BASE $LAN6_BASE $(echo "${LAN_NETWORK:-} ${LAN_NETWORK6:-}" | tr ',' ' '); do
+    for net in $(echo "${LAN_NETWORK:-} ${LAN_NETWORK6:-}" | tr ',' ' '); do
         case "$net" in
             *:*) [ "$1" = 6 ] && echo "$net" ;;
             *)   [ "$1" = 4 ] && echo "$net" ;;
         esac
     done
+}
+
+protected_networks() {
+    if [ "$1" = 6 ]; then
+        printf '%s\n' fc00::/7 fe80::/10 ff00::/8
+    else
+        printf '%s\n' 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16
+    fi
 }
 
 # Resolvers of one family (4 or 6) from resolv.conf
@@ -62,14 +66,20 @@ ruleset() {
     echo ":$CHAIN - [0:0]"
     echo "-F $CHAIN"
     echo "-A $CHAIN -o lo -j ACCEPT"
+    for net in $(lan_networks "$fam"); do
+        echo "-A $CHAIN -d $net -j ACCEPT"
+    done
+    for port in 1080 8080; do
+        echo "-A $CHAIN -p tcp -m conntrack --ctstate ESTABLISHED --ctdir REPLY --sport $port -j ACCEPT"
+    done
+    for net in $(protected_networks "$fam"); do
+        echo "-A $CHAIN -d $net -j REJECT --reject-with $reject"
+    done
     echo "-A $CHAIN -o $TUNNEL_IF -j ACCEPT"
     mark=$(tunnel_mark)
     if [ -n "$mark" ]; then
         echo "-A $CHAIN -p udp -m mark --mark $mark -j ACCEPT"
     fi
-    for net in $(lan_networks "$fam"); do
-        echo "-A $CHAIN -d $net -j ACCEPT"
-    done
     if [ "$dns" = 1 ]; then
         for ns in $(resolvers "$fam"); do
             echo "-A $CHAIN -p udp -d $ns --dport 53 -j ACCEPT"

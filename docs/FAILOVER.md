@@ -124,7 +124,10 @@ When no working configs remain:
 - New configs are automatically picked up and tested
 - The proxy ports still accept connections, but every outbound connection is rejected by the kill switch (`scripts/killswitch.sh`) until a working config is found
 
-This is a **fail-closed** design: no traffic leaves the container except through the tunnel, LAN ranges and the tunnel's own socket.
+This is a **fail-closed** design: new outbound traffic leaves through the
+tunnel or its marked UDP socket, except for exact destination CIDRs explicitly
+listed in `LAN_NETWORK*` and narrow TCP replies to established proxy-client
+connections. Private/link-local destinations are blocked by default.
 
 ## State Diagram
 
