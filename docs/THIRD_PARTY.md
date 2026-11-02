@@ -6,8 +6,16 @@ This project builds on top of several open-source components.
 
 **Mainfrezzer/amnezia-bridge**
 - Repository: https://github.com/Mainfrezzer/amnezia-bridge
-- Image: `ghcr.io/mainfrezzer/amnezia-bridge:latest`
+- Image: `ghcr.io/mainfrezzer/amnezia-bridge@sha256:fcfa9ae5f361e257e3451a37730c0886b7c1c2f9664b5dd7021c85201c90dc31` (OCI index, upstream v0.1.6; linux/amd64, linux/arm64, linux/arm/v6, linux/arm/v7, linux/386, linux/ppc64le, linux/s390x)
 - License: **None declared**
+
+The index digest and platform list were checked against the registry on 2026-11-03.
+The derived image was built and runtime-smoke-tested on `linux/amd64` only; the
+other platforms are advertised by the upstream index but have not been
+independently validated for this overlay. The inspected upstream runtime
+reported Alpine 3.24.2, AmneziaWG tools 3.1.20260812, Privoxy 4.0.0 and BusyBox
+timeout 1.37.0. The overlay adds `curl`, `jq`, `bind-tools` and `su-exec` from
+the Alpine repositories; those packages are not pinned to individual versions.
 
 The upstream project provides the base AmneziaWG tunnel container with Privoxy and microsocks.
 Our project adds a thin overlay on top of this image without modifying its core functionality.
