@@ -33,14 +33,15 @@ install_family() {
     family="$1"
     networks="$2"
     gateway="$3"
-    [ -n "$networks" ] || return 0
+    networks=$(printf '%s' "$networks" | tr ',' ' ')
+    set -- $networks
+    [ "$#" -gt 0 ] || return 0
     if [ -z "$gateway" ]; then
         echo "ERROR: requested IPv$family routes but no Docker gateway is available" >&2
         return 1
     fi
 
-    networks=$(printf '%s' "$networks" | tr ',' ' ')
-    for network in $networks; do
+    for network do
         case "$family:$network" in
             4:*:*) echo "ERROR: IPv6 CIDR in IPv4 route list: $network" >&2; return 1 ;;
             4:*)

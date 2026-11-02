@@ -43,6 +43,16 @@ if grep -Eq '192\.168\.0\.0/16|10\.0\.0\.0/8|172\.16\.0\.0/12' "$ROUTE_CALLS"; t
 fi
 
 : > "$ROUTE_CALLS"
+if LAN_NETWORK='' LAN_NETWORK6=' ,  ' PROXY_CLIENT_NETWORKS='' PROXY_CLIENT_NETWORKS6='' \
+    IP4GATEWAY=172.30.0.1 IP6GATEWAY='' sh "$PROJECT_DIR/scripts/proxy-routes.sh"; then
+    :
+else
+    echo "FAIL: empty route lists were rejected without gateways" >&2
+    exit 1
+fi
+[ ! -s "$ROUTE_CALLS" ] || { echo "FAIL: empty route lists called ip" >&2; exit 1; }
+
+: > "$ROUTE_CALLS"
 if LAN_NETWORK='192.168.1.0/24' IP4GATEWAY='' sh "$PROJECT_DIR/scripts/proxy-routes.sh"; then
     echo "FAIL: missing gateway accepted for required LAN route" >&2
     exit 1
