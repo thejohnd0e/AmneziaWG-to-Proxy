@@ -1,0 +1,8 @@
+config/
+bad_config/
+.env
+.env.*
+!.env.example
+.git/
+.playwright-mcp/
+session-*.md

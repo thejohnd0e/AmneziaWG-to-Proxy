@@ -22,19 +22,22 @@ The SOCKS5 and HTTP proxies have **no authentication**.
 Anyone who can reach the proxy ports can use your VPN tunnel.
 
 **Mitigations:**
-- Use `PROXY_BIND_ADDRESS=127.0.0.1` to bind only to localhost
-- Use firewall rules to restrict access to the proxy ports
+- The default `PROXY_BIND_ADDRESS=127.0.0.1` binds only to localhost
+- For LAN access, bind to a specific trusted host interface and restrict clients with a forwarding firewall policy
 - Only expose ports on trusted networks
 
 ## Bind Address Risk
 
-Default binding to `0.0.0.0` exposes proxies to **all network interfaces**.
-If your machine is on a shared or public network, this allows anyone to route traffic through your VPN.
+The default binding is `127.0.0.1`. Setting `PROXY_BIND_ADDRESS=0.0.0.0` exposes proxies to **all network interfaces**. The proxies have no authentication; anyone who can reach them can route traffic through your VPN.
 
-**Recommendation:** Change to `127.0.0.1` if only local applications need the proxy:
+**Recommendation:** Keep the default for local applications:
 ```dotenv
 PROXY_BIND_ADDRESS=127.0.0.1
 ```
+
+### Docker firewall note
+
+Published Docker ports are forwarded through Docker-managed packet-filter rules. With Docker's iptables backend, ordinary UFW rules and host `INPUT` rules may not filter this forwarded traffic as expected. Apply restrictions in `DOCKER-USER` (accounting for Docker DNAT and the original published destination), or bind the publication to a specific trusted host interface. With Docker's nftables backend, use the corresponding forwarding policy; do not assume the `DOCKER-USER` chain exists. Test the effective rule path on the actual host and Docker backend. A bind address is not authentication or a per-client ACL.
 
 ## Fail-Closed Design
 

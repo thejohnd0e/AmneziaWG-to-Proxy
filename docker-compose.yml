@@ -29,8 +29,8 @@ services:
       - ./config:/configs
       - ./bad_config:/bad_config
     ports:
-      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:8200:1080/tcp"
-      - "${PROXY_BIND_ADDRESS:-0.0.0.0}:9200:8080/tcp"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:8200:1080/tcp"
+      - "${PROXY_BIND_ADDRESS:-127.0.0.1}:9200:8080/tcp"
     environment:
       FAILOVER_INTERVAL: ${FAILOVER_INTERVAL:-15}
       FAILOVER_FAILURES: ${FAILOVER_FAILURES:-3}

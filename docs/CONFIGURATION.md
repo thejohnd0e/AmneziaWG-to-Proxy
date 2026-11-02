@@ -61,7 +61,7 @@ The same resolvers are used by the config checker.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PROXY_BIND_ADDRESS` | `0.0.0.0` | Bind address for exposed proxy ports |
+| `PROXY_BIND_ADDRESS` | `127.0.0.1` | Host bind address for proxy ports; use a trusted interface explicitly for LAN access |
 | `HTTPPORT` | `8080` | Internal HTTP proxy port (Privoxy) |
 
 ## Network Settings
