@@ -36,7 +36,7 @@ The script never registers from the real address: it needs a proxy or an active 
 | `STARTUP_CHECKS` | `1` | Health checks per config at startup; a dead config costs one check, not `FAILOVER_FAILURES` |
 | `FAILOVER_TIMEOUT` | `8` | Max seconds per HTTPS probe of the monitoring loop; a lower value (e.g. `3`) notices a stalled tunnel sooner |
 | `STARTUP_TIMEOUT` | `8` | Max seconds per probe at startup, ranking and after a tunnel restart (the first handshake of a tunnel can be slow); independent of `FAILOVER_TIMEOUT` |
-| `AWG_UP_TIMEOUT` | `30` | Max seconds for `awg-quick up`; timed-out candidates remain in `config/` |
+| `AWG_UP_TIMEOUT` | `30` | Max seconds for `awg-quick up`; endpoint hostnames are resolved separately with a fixed 10-second bound before AWG starts |
 | `SPEED_TEST` | `1` | Rank configs at startup; with default `RANK_BUDGET=0`, the first working config wins, not necessarily the globally fastest |
 | `SPEED_TEST_URL` | *(first `HEALTH_URLS` entry)* | URL used for latency probes |
 
@@ -51,12 +51,15 @@ The script never registers from the real address: it needs a proxy or an active 
 
 | Variable | Default | Description |
 |---|---|---|
-| `DNS_PRIMARY` | `1.1.1.1` | Primary resolver used inside the container |
-| `DNS_SECONDARY` | `1.0.0.1` | Secondary resolver |
+| `DNS_PRIMARY` | `1.1.1.1` | Primary numeric resolver written directly to `/etc/resolv.conf` on Docker's standard bridge |
+| `DNS_SECONDARY` | `1.0.0.1` | Secondary numeric resolver written directly to `/etc/resolv.conf` |
 
-Public resolvers are used because a host or router DNS may sinkhole domains to
-unreachable addresses (e.g. `198.18.0.0/15`), which makes the proxy time out.
-The same resolvers are used by the config checker.
+Endpoint hostname resolution uses these configured numeric servers under
+dedicated UID `65532`, only during pre-tunnel staging. Normal proxy DNS is
+allowed only through `wg0`; DNS to LAN destinations is rejected even if the LAN
+CIDR or loopback is explicitly allowed. The service requires Compose's standard `bridge`
+network so Docker does not replace numeric resolvers with the UID-blind
+`127.0.0.11` embedded DNS. Choose resolvers reachable from the Docker bridge.
 
 ## Proxy Settings
 
@@ -73,8 +76,6 @@ The same resolvers are used by the config checker.
 | `LAN_NETWORK6` | *(empty)* | Exact IPv6 destination CIDRs the proxy may reach outside the tunnel |
 | `PROXY_CLIENT_NETWORKS` | *(empty)* | IPv4 client CIDRs that need return routes; does not allow new proxy connections to those clients |
 | `PROXY_CLIENT_NETWORKS6` | *(empty)* | IPv6 client CIDRs that need return routes; does not allow new proxy connections to those clients |
-| `DISABLE_TUNNEL_MODE` | *(empty)* | Set to any value to disable full-tunnel enforcement |
-
 Private and link-local destinations (including `169.254.0.0/16`) are blocked by
 default, even when the tunnel is up. Add only a narrow `LAN_NETWORK` CIDR for a
 destination the proxy genuinely needs. Such destinations bypass the VPN. The
@@ -122,9 +123,13 @@ docker compose up -d --force-recreate
 
 ## Updating the Base Image
 
+The upstream image is pinned by digest in `Dockerfile`; `--no-cache` alone does
+not select a newer upstream release. Review and update that digest first, then:
+
 ```bash
-docker compose build --no-cache
+docker compose build --pull --no-cache
 docker compose up -d --force-recreate
 ```
 
-This pulls the latest upstream `ghcr.io/mainfrezzer/amnezia-bridge:latest` and rebuilds the overlay.
+The package installs in the overlay still use the Alpine repositories available
+at build time; the base digest does not freeze those package versions.

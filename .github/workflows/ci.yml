@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-static:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shell syntax and mocked tests
+        run: |
+          set -eu
+          for file in scripts/*.sh tests/*.sh; do sh -n "$file"; done
+          sh tests/build-defaults-test.sh
+          sh tests/failover-manager-test.sh
+          sh tests/resolve-endpoint-test.sh
+          sh tests/killswitch-mark-test.sh
+          sh tests/check-tunnel-test.sh
+          sh tests/proxy-routes-test.sh
+      - name: ShellCheck (POSIX sh)
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 -s sh --severity=error scripts/*.sh tests/*.sh
+      - name: Hadolint
+        run: docker run --rm -i hadolint/hadolint:v2.12.0 hadolint --failure-threshold error - < Dockerfile
+
+  network-namespace:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install namespace test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y iproute2 iptables iputils-ping python3
+      - name: Run real firewall namespace tests
+        run: sudo sh tests/killswitch-test.sh
+
+  isolated-image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose without secrets
+        run: |
+          touch "$RUNNER_TEMP/empty.env"
+          docker compose --env-file "$RUNNER_TEMP/empty.env" config --quiet
+      - name: Build pinned image
+        run: docker build --pull -t amnezia-bridge-failover:ci .
+      - name: Check image contents
+        run: IMAGE=amnezia-bridge-failover:ci sh tests/image-smoke-test.sh
+      - name: Check proxy DNS fail-closed behavior
+        run: IMAGE=amnezia-bridge-failover:ci sh tests/proxy-dns-policy-test.sh

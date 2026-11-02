@@ -22,10 +22,10 @@ tunnel into your local network as a plain HTTP/SOCKS5 proxy.
 
 ## Features
 
-- Speed-tests all configs at startup and connects to the fastest one
+- Ranks working configs at startup; by default it activates the first working config (the remembered last-working config is tried first after a restart)
 - Automatic detection and switching to the next working config
 - Supports AmneziaWG 1.0, 1.5 (`I1`-`I5`) and 2.0 (`S3`/`S4`, `H1`-`H4` ranges) configs; the version is whatever the config contains
-- Configs that keep failing are moved to `bad_config/` (a single failure only counts as a strike); the tunnel is restarted automatically first
+- Failed candidates are kept in place until a replacement works; repeated committed failures move a config to `bad_config/`, while endpoint DNS failures do not add strikes
 - Dual health check endpoints (Google + Cloudflare)
 - Manual proxy checker CLI tool
 - All tunables configurable via `.env`
@@ -62,6 +62,12 @@ Proxies are available at:
 
 ## How It Works
 
+The service uses Docker's standard `bridge` network and numeric DNS servers
+(`DNS_PRIMARY` / `DNS_SECONDARY`). This is intentional: Docker's user-defined
+networks replace the container resolver with `127.0.0.11`, which cannot preserve
+the per-process DNS restriction used while resolving a tunnel endpoint. The
+service does not rely on Compose service-name discovery.
+
 ```
 ┌──────────────────────────────────────────────────┐
 │  Docker Container                               │
@@ -69,7 +75,7 @@ Proxies are available at:
 │  ┌─────────────────┐   ┌──────────────────────┐  │
 │  │ failover-manager │   │ entrypoint           │  │
 │  │                 │   │                      │  │
-│  │ • picks fastest  │   │ • starts proxies     │  │
+│  │ • selects config │   │ • starts proxies     │  │
 │  │ • checks health  │   │ • supervises process │  │
 │  │ • switches on    │   │                      │  │
 │  │   failure        │   │                      │  │
@@ -98,15 +104,19 @@ Each config is its own registration with its own key pair, generated locally. In
 
 ## Fastest Server Selection
 
-On startup the failover manager speed-tests every config before connecting:
+With `SPEED_TEST=1`, startup ranks candidate configs:
 
 1. Bring up the tunnel with the config.
 2. Verify connectivity (HTTPS through `wg0`).
 3. Measure latency — best of 3 probes, DNS lookup excluded.
 4. Tear the tunnel down.
 
-Working configs are ranked by latency, and the fastest one becomes active.
-Configs that cannot start are moved to `bad_config/` at once; configs that stay unreachable get a strike and are moved after `QUARANTINE_AFTER` strikes. Startup is fast: the first working config wins (`RANK_BUDGET=0`) and each config gets one health check (`STARTUP_CHECKS`).
+Measured working configs are ranked by latency, subject to `RANK_BUDGET`. With
+the default `RANK_BUDGET=0`, ranking stops as soon as a working config is found;
+that config is not necessarily globally fastest. Configs that fail selection
+are penalized only after a replacement becomes active, and are moved to
+`bad_config/` only after `QUARANTINE_AFTER` committed strikes. Endpoint DNS
+failures do not add strikes. Each candidate gets `STARTUP_CHECKS` health checks.
 The ranked list is reused for later failovers and rebuilt when exhausted.
 
 Disable it with `SPEED_TEST=0` to use the first config by name instead.

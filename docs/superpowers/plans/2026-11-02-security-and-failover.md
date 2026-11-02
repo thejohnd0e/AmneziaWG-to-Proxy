@@ -30,7 +30,7 @@ Proposed behavior:
 - New `PROXY_CLIENT_NETWORKS` and `PROXY_CLIENT_NETWORKS6`, empty by default, specify remote client networks requiring return routes. They do not authorize proxy requests to those networks. Connected Docker-network return routes remain available without a broad LAN exemption.
 - Permit direct TCP replies to inbound proxy connections with conntrack reply-direction matching and source-port restrictions. Never add a blanket `ESTABLISHED,RELATED` egress allowance.
 - Block proxy-originated private/link-local destinations unless explicitly allowed, before the general `-o wg0` permit. IPv4 protected ranges: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`; IPv6: `fc00::/7`, `fe80::/10`, `ff00::/8`. Loopback remains permitted for internal proxy chaining. This policy covers these ranges, not every special-use address or every provider's metadata mechanism.
-- Resolve endpoint hostnames in a bounded helper under a dedicated UID. DNS exceptions apply only to that UID and the configured resolvers; proxy processes must not share that UID. Stage numeric endpoints before running `awg-quick`, with DNS exceptions already closed. Literal IPv4 and bracketed IPv6 endpoints require no DNS exception.
+- Resolve endpoint hostnames in a bounded helper under a dedicated UID. DNS exceptions apply only to that UID and the configured numeric resolvers; proxy processes must not share that UID. Use Compose `network_mode: bridge` so `/etc/resolv.conf` contains those numeric servers rather than Docker's embedded `127.0.0.11`. Stage numeric endpoints before running `awg-quick`, with DNS exceptions already closed. Literal IPv4 and bracketed IPv6 endpoints require no DNS exception. The single-service Compose project does not depend on service-name discovery.
 - Keep `RANK_BUDGET=0` and `FAST_START=1`; document first-working/last-working semantics rather than promise a global fastest-server selection.
 
 Out of scope: proxy authentication/migration, automatic failback, JSON status service, automatic restoration of existing quarantined files, WARP registration changes, GHCR publishing, multi-arch release automation, translated README, and production-server changes. Container capability removal/read-only filesystem are a separate compatibility-hardening follow-up, not unverified compose flags.
@@ -118,19 +118,22 @@ Out of scope: proxy authentication/migration, automatic failback, JSON status se
 
 ### Task 5: Isolate endpoint DNS resolution
 
+**Design:** `docs/superpowers/specs/2026-11-02-endpoint-dns-isolation-design.md`.
+
 **Files:** Create `scripts/resolve-endpoint.sh`, `tests/resolve-endpoint-test.sh`; modify `Dockerfile`, `scripts/failover-manager.sh`, `scripts/killswitch.sh`, manager tests and namespace tests.
 
-**Interfaces:** Install a dedicated non-login endpoint-resolver user with UID `65532`; no proxy runs under this UID. Install a bounded resolver utility and UID-switching helper explicitly in the image. `/resolve-endpoint.sh <hostname>` prints exactly one validated address, returns `0` on success, `1` on resolution failure, `2` on local infrastructure failure. Timeout is 10 seconds. It must not read private configuration files. `killswitch.sh dns-open` permits DNS only for this UID, never all processes.
+**Interfaces:** Compose uses standard `bridge` mode and keeps the numeric `${DNS_PRIMARY}` / `${DNS_SECONDARY}` `dns:` entries so `/etc/resolv.conf` contains direct numeric servers, not `127.0.0.11`. Install `bind-tools` (`dig`), a dedicated non-login endpoint-resolver user with UID `65532`, and `su-exec`; no proxy runs under this UID. `/resolve-endpoint.sh <hostname>` uses bounded A/AAAA DNS queries and prints exactly one validated address, returns `0` on success, `1` on resolution failure, `2` on local infrastructure failure. Timeout is 10 seconds. It must not read private configuration files. `killswitch.sh dns-open` permits DNS only for this UID to the exact nameservers in `/etc/resolv.conf`, never all processes. Proxy DNS is permitted only over `wg0`.
 
-- [ ] First run a bounded compatibility experiment in the pinned/test base: verify resolver output parsing, IPv4/IPv6 support, UID ownership matching and Docker's effective resolver path. If Docker DNS forwarding does not preserve the required isolation, stop this task for design review; do not fall back to container-wide DNS exceptions.
-- [ ] Add parsing/staging tests for IPv4, bracketed IPv6, hostname plus port, multiple peers, malformed endpoint syntax, DNS failure and timeout. Assert only staged endpoints change and source bytes remain identical.
-- [ ] Add real namespace DNS tests proving the helper UID can resolve during its window, proxy UID cannot, neither can after closure, a private resolver receives no hidden LAN exemption, and an existing DNS TCP stream cannot bypass closure. Exercise both UDP and TCP DNS.
-- [ ] Run new tests to demonstrate the baseline leak and unbounded resolution behavior.
-- [ ] Resolve each hostname before `awg-quick up`: open UID-scoped DNS, run the bounded helper, close DNS on every exit path, validate/substitute the numeric address, then start AWG. Numeric endpoints do not open DNS. No unresolved hostname fallback is allowed.
-- [ ] Ensure endpoint DNS allowance is evaluated before protected-destination rejection only for the helper; keep proxy DNS subject to normal tunnel policy. Test IPv6 and the absence of an IPv6 default route explicitly.
-- [ ] Test INT, TERM, resolver timeout, failed firewall finalization and partial AWG startup. Assert DNS is closed, readiness is absent, no helper remains and no config is quarantined merely for resolution failure. If closure fails, terminate proxy processes/container rather than leave service running under a temporary policy.
-- [ ] Run resolver, manager, mark and namespace suites. Test failover while both proxies are actively receiving synthetic hostname requests, capturing the direct interface to prove no client DNS exits there.
-- [ ] Commit: `security: isolate endpoint resolution from proxy DNS traffic`.
+- [x] Run a bounded compatibility experiment on `.173`: with standard bridge and explicit numeric DNS, verify direct `/etc/resolv.conf` entries and UID-owner packet filtering. User-defined bridge `127.0.0.11` failed UID isolation; do not use it or fall back to container-wide DNS exceptions. Remaining base utility, answer parsing, IPv6 and timeout checks are image smoke tests below.
+- [x] Add a Compose config test asserting `network_mode: bridge` and numeric DNS servers; verify this project has no service-name dependency.
+- [x] Add parsing/staging tests for IPv4, bracketed IPv6, hostname plus port, multiple peers, malformed endpoint syntax, DNS failure and timeout. Assert only staged endpoints change and source bytes remain identical.
+- [x] Add real namespace/runtime DNS tests proving resolver UID access during its window, proxy/root denial, DNS closure, private-resolver isolation despite LAN/loopback allow and existing TCP-stream closure. Exercise UDP/TCP and assert firewall policy selects `wg0` with a simulated tunnel route.
+- [x] Run regression tests against baseline `a79a9fe` to demonstrate missing endpoint-DNS failure handling; direct-vs-embedded Docker DNS behavior was demonstrated in the compatibility experiment.
+- [x] Resolve each hostname before `awg-quick up`: open UID-scoped DNS, run the bounded helper, close DNS on every exit path, validate/substitute the numeric address, then start AWG. Numeric endpoints do not open DNS. No unresolved hostname fallback is allowed.
+- [x] Ensure endpoint DNS allowance is evaluated before protected-destination rejection only for the helper; reject non-tunnel proxy DNS before LAN exceptions and reject `127.0.0.11`. Exercise IPv6 resolver/endpoint parsing and the no-IPv6-default-route namespace path.
+- [x] Test timeout, TERM, failed DNS setup/finalization and AWG startup failure. Assert DNS closure, readiness removal, helper/staging cleanup and no DNS-failure strikes/quarantine. Cleanup failure terminates the manager before AWG starts.
+- [x] Run resolver, manager, mark and namespace suites. Exercise both live proxies with synthetic hostname requests, capture the container `eth0` for DNS, and prove DNS is rejected without a tunnel and routed via `wg0` with a simulated tunnel route.
+- [x] Commit: `security: isolate endpoint resolution from proxy DNS traffic` (`1f3cd87`).
 
 ### Task 6: Pin and simplify the image without changing proxy behavior
 
@@ -138,13 +141,13 @@ Out of scope: proxy authentication/migration, automatic failback, JSON status se
 
 **Interfaces:** Base reference is `ghcr.io/mainfrezzer/amnezia-bridge@sha256:<verified-index-digest>`. Use a registry-verified manifest/index, never a guessed digest. Keep `/scripts` as the single script copy; compatibility paths under `/` are symlinks.
 
-- [ ] Inspect the remote manifest and image in a disposable environment; record the chosen digest, available architectures, AWG/curl/timeout/resolver versions and upstream provenance. If no suitable manifest is available, stop and report the blocker rather than inventing a pin or architecture support.
-- [ ] Add an image smoke test that checks `/entrypoint.sh`, `/failover-manager.sh`, `/killswitch.sh`, `/check-tunnel.sh`, `/ensure-tun.sh`, `/proxy-routes.sh`, `/resolve-endpoint.sh`, executable permissions and required utilities.
-- [ ] Replace `latest` with the verified digest; remove duplicate COPY operations, create compatibility symlinks and combine related chmod/mkdir operations. Do not claim this pins Alpine package repositories or guarantees bit-for-bit reproducibility.
-- [ ] Add Renovate configuration for Docker digest updates as reviewed PRs, without automerge. Explain that a pinned digest does not resolve missing upstream licensing.
-- [ ] Inspect the bundled Privoxy configuration in the image, including forwarding, filtering and CONNECT restrictions. Smoke-test synthetic HTTP, HTTPS and CONNECT to a nonstandard local test port. Report intended restrictions; do not silently enable every CONNECT port or replace the proxy stack.
-- [ ] Build with `docker compose --env-file <empty-test-env> config --quiet` followed by an isolated image build; run image smoke tests. Do not start the real compose service or mount real config directories.
-- [ ] Commit: `build: pin upstream image and simplify script installation`.
+- [x] Inspect the remote manifest and image in a disposable environment; record the chosen digest, available architectures, AWG/curl/timeout/resolver versions and upstream provenance. Overlay runtime checks were on amd64 only.
+- [x] Add an image smoke test that checks `/entrypoint.sh`, `/failover-manager.sh`, `/killswitch.sh`, `/check-tunnel.sh`, `/ensure-tun.sh`, `/proxy-routes.sh`, `/resolve-endpoint.sh`, executable permissions and required utilities.
+- [x] Replace `latest` with the verified digest; remove duplicate COPY operations, create compatibility symlinks and combine related chmod/mkdir operations. Alpine packages remain repository-current; no bit-for-bit reproducibility claim.
+- [x] Add Renovate configuration for reviewed Docker digest updates without automerge. Document that a pinned digest does not resolve missing upstream licensing.
+- [x] Inspect the bundled Privoxy configuration and smoke-test synthetic HTTP/HTTPS CONNECT to a nonstandard local port. CONNECT behavior is documented and unchanged.
+- [x] Validate Compose using an empty synthetic env, build the image in isolation and run image smoke tests. The real Compose service and real config directories were not started or mounted.
+- [x] Commit: `build: pin upstream image and simplify script installation` (`4b6a1bb`).
 
 ### Task 7: Documentation, CI and final isolated acceptance
 
@@ -152,14 +155,14 @@ Out of scope: proxy authentication/migration, automatic failback, JSON status se
 
 **Interfaces:** CI separates mock/static checks, Docker image smoke checks and privileged disposable namespace checks. No production secrets, WARP API calls or real VPN credentials are required.
 
-- [ ] Add CI running every mocked shell suite, shell syntax checks, ShellCheck with explicit POSIX/Bash dialects and pinned tool versions, and Hadolint. Address findings relevant to changed code; document any narrow suppressions with reasons. Namespace jobs must fail rather than silently pass if their required prerequisites are unavailable.
-- [ ] Run privileged namespace tests on a Linux runner with Python, iproute2, iptables and ping installed. Run image tests against the built artifact, not the developer host's utilities. Validate compose using a synthetic environment only.
-- [ ] Remove all `DISABLE_TUNNEL_MODE` advice and dead compose/example comments. Correct claims about fastest selection, timing, permanent quarantine and external services: automatic health/latency probes contact configured health endpoints; GeoIP/IP-discovery APIs are checker behavior, not automatic manager behavior.
-- [ ] Add upgrade instructions: existing `.env` overrides remain effective; broad LAN entries must be narrowed manually; restored quarantined configs require operator review. Document the optional authentication/migration and container-hardening work as not yet provided.
-- [ ] Add a leak incident procedure limited to a disposable test container or explicit maintenance window: stop its tunnel, verify synthetic or approved public requests fail through both SOCKS5 remote DNS and HTTP, capture DNS on the direct interface, and restore service. Explain that one failed curl alone does not prove all TCP/UDP/IPv6 paths safe.
-- [ ] Run acceptance matrix: cold start without connectivity; repeated failures beyond `QUARANTINE_AFTER`; process restart while offline; restoration of connectivity; alternative candidate succeeds; candidate flaps; both ranking modes; fast start; tunnel disappearance; endpoint DNS failure; explicit LAN destination; default metadata denial; allowed client receives replies. Verify file preservation and actual traffic path separately.
-- [ ] Perform a whole-diff review, rerun all applicable tests, and record exact commands/results plus privileged or architecture checks not executed. Do not claim leak freedom from mock results.
-- [ ] Commit: `ci: verify failover safety and document hardened network policy`.
+- [x] Add CI for mocked shell suites, syntax, POSIX ShellCheck, pinned Hadolint, image smoke and a privileged namespace job. The namespace test fails when its root/prerequisites are missing.
+- [x] Run privileged namespace tests on `.173` with Python/iproute2/iptables/ping; run image tests against the built image; validate Compose using a synthetic env.
+- [x] Remove obsolete `DISABLE_TUNNEL_MODE` advice and correct selection, quarantine, timing and external-service claims.
+- [x] Add upgrade/migration notes and document authentication/container-hardening work as not provided.
+- [x] Add a disposable-container DNS incident procedure; explicitly state that a failed curl alone does not prove all paths safe.
+- [ ] Acceptance matrix: manager tests cover cold/failed startup, repeated failures, alternative activation, ranking/fast-start, tunnel disappearance and endpoint DNS failure; namespace tests cover LAN, metadata denial and client replies. The full offline-restart/restore-connectivity/candidate-flapping matrix was not run end-to-end. Proxy DNS routing was tested with a simulated `wg0` route, not a real AmneziaWG handshake; architecture smoke was amd64 only.
+- [x] Perform whole-diff review, rerun applicable tests and record exact results and unexecuted coverage. No leak-freedom claim is made from mocks or simulated-tunnel results.
+- [x] Commit: `ci: verify failover safety and document hardened network policy` (created in this final commit).
 
 ## Completion and rollback
 

@@ -10,13 +10,13 @@ It continuously monitors the active tunnel and switches to the next config when 
 ## Algorithm
 
 ```
-1. Speed-test every *.conf in /configs:
+1. If `FAST_START=1`, try the last-working config first and skip ranking if it passes. Otherwise rank candidates in version-sorted order:
    a. Copy to wg0.conf, awg-quick up wg0
    b. Health check (HTTPS via wg0); record a pending failure if it does not pass
    c. Measure latency (best of 3 probes through wg0)
    d. awg-quick down wg0
-2. Rank working configs by latency, fastest first
-3. Activate the fastest config and mark it ACTIVE
+2. Rank measured working configs by latency
+3. Activate the lowest-latency measured config; with the default `RANK_BUDGET=0`, ranking stops at the first working candidate, which may not be globally fastest
 4. Monitoring loop:
    a. Sleep FAILOVER_INTERVAL seconds
    b. Run health check (HTTPS via wg0)
@@ -41,16 +41,16 @@ It continuously monitors the active tunnel and switches to the next config when 
 
 ## Speed Test
 
-At startup the manager measures every config before connecting:
+When `SPEED_TEST=1`, the manager measures configs during startup ranking:
 
 - Each config is brought up and checked for connectivity.
 - Latency is the **best of 3** HTTPS probes through `wg0`, with DNS lookup
   time subtracted so configs are compared by server latency, not resolver speed.
 - A failed `awg-quick up` or health probe is inconclusive: it may be a bad
-  candidate, DNS failure or a host/network outage. Failed candidates are kept
-  pending until a replacement is actually active. If no candidate becomes
-  healthy, config files and existing strike counts are preserved for the next
-  retry; this deliberately avoids diagnosing the cause from failed probes alone.
+  candidate or a host/network outage. Such failures are kept pending until a
+  replacement is actually active. Endpoint DNS failures are skipped without
+  adding a strike. If no candidate becomes healthy, config files and existing
+  strike counts are preserved for the next retry.
 - Once a replacement is active, each failed candidate from that selection cycle
   receives one strike. After `QUARANTINE_AFTER` committed strikes, it is moved to
   `bad_config/`. A config's existing strikes are cleared only after it remains
@@ -88,24 +88,28 @@ This dual-endpoint approach prevents false positives when one service is tempora
 
 ## Timing
 
-With default settings (`FAILOVER_INTERVAL=15`, `FAILOVER_FAILURES=3`):
+With default monitoring settings (`FAILOVER_INTERVAL=15`, `FAILOVER_FAILURES=3`):
 
 - A health check runs every 15 seconds
-- After 3 consecutive failures (~45 seconds), the config is rejected
-- The next config is tested immediately
-- Total time to failover: ~45–60 seconds
+- After 3 consecutive failed health checks (~45 seconds), the manager restarts
+  the same tunnel up to `TUNNEL_RESTARTS` times before switching candidates.
+- A failed config remains in place until a replacement becomes active; then a
+  strike is committed. Quarantine happens only after `QUARANTINE_AFTER` strikes.
+- Exact failover time also depends on startup/restart probe timeouts and candidate
+  availability; ~45–60 seconds is only a healthy-network estimate.
 
 ## Rejected Configs
 
-When a config is rejected:
+When a config reaches `QUARANTINE_AFTER` committed strikes:
 
 1. The tunnel is brought down (`awg-quick down wg0`)
 2. The config file is copied to `bad_config/`
 3. The original is deleted from `config/`
 4. The next config is selected
 
-Rejected configs are **permanently excluded** from automatic retry.
-To restore a rejected config, manually move it back to `config/`.
+Quarantined configs are excluded from automatic retry until an operator reviews
+and restores them to `config/`. A DNS resolution failure alone neither strikes
+nor quarantines a config.
 
 ### Name Collisions
 
