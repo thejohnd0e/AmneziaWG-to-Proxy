@@ -22,4 +22,17 @@ done
 grep -Fxq '!.env.example' "$ignore_file" \
     || { echo "FAIL: .dockerignore must retain .env.example" >&2; exit 1; }
 
-echo "PASS: safe proxy defaults and build-context exclusions"
+grep -Eq '^    network_mode: bridge[[:space:]]*$' "$PROJECT_DIR/docker-compose.yml" \
+    || { echo "FAIL: Compose must use standard bridge to avoid Docker embedded DNS" >&2; exit 1; }
+grep -Fq '${DNS_PRIMARY:-1.1.1.1}' "$PROJECT_DIR/docker-compose.yml" \
+    || { echo "FAIL: primary numeric resolver is not configured" >&2; exit 1; }
+grep -Fq '${DNS_SECONDARY:-1.0.0.1}' "$PROJECT_DIR/docker-compose.yml" \
+    || { echo "FAIL: secondary numeric resolver is not configured" >&2; exit 1; }
+if grep -Eq '^[[:space:]]+networks:' "$PROJECT_DIR/docker-compose.yml"; then
+    echo "FAIL: service-specific network would re-enable Docker embedded DNS" >&2
+    exit 1
+fi
+grep -Fq 'ghcr.io/mainfrezzer/amnezia-bridge@sha256:fcfa9ae5f361e257e3451a37730c0886b7c1c2f9664b5dd7021c85201c90dc31' "$PROJECT_DIR/Dockerfile" \
+    || { echo "FAIL: upstream image must use the verified OCI index digest" >&2; exit 1; }
+
+echo "PASS: safe proxy defaults, isolated build context and direct numeric DNS"

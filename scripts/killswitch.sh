@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC3043 # Alpine's supported BusyBox ash and the test dash provide function-local variables.
 # killswitch.sh — Outbound kill switch for the container
 # Owns the AWG_KILLSWITCH chain, hooked into OUTPUT. Only loopback, the tunnel
 # interface, LAN ranges and the tunnel's own UDP socket (matched by its fwmark)
@@ -44,6 +45,75 @@ resolvers() {
     awk -v six="$1" '$1 == "nameserver" && (($2 ~ /:/) == (six == "6")) { print $2 }' "$RESOLV_CONF" 2>/dev/null
 }
 
+valid_resolver_address() {
+    awk '
+        function ipv4(s, a, n, i) {
+            n = split(s, a, ".")
+            if (n != 4) return 0
+            for (i = 1; i <= 4; i++)
+                if (a[i] !~ /^[0-9]+$/ || length(a[i]) > 3 || a[i] > 255) return 0
+            return 1
+        }
+        function groups(s, a, n, i) {
+            if (s == "") return 0
+            n = split(s, a, ":")
+            for (i = 1; i <= n; i++)
+                if (a[i] !~ /^[[:xdigit:]]+$/ || length(a[i]) > 4) return -100
+            return n
+        }
+        {
+            s = $0
+            if (s !~ /^[0-9A-Fa-f:.]+$/) exit 1
+            if (s ~ /:/) {
+                if (s ~ /:::/) exit 1
+                p = index(s, "::")
+                if (p) {
+                    left = substr(s, 1, p - 1)
+                    right = substr(s, p + 2)
+                    if (index(right, "::")) exit 1
+                    n = groups(left) + groups(right)
+                    if (n < 0 || n >= 8) exit 1
+                } else if (groups(s) != 8) exit 1
+                compact = s
+                gsub(/:/, "", compact)
+                if (compact == "" || compact ~ /^0+$/) exit 1
+                exit 0
+            }
+            exit ipv4(s) ? 0 : 1
+        }
+    ' <<EOF
+$1
+EOF
+}
+
+validate_resolver_config() {
+    local found=0 ns
+    [ -r "$RESOLV_CONF" ] || {
+        log "ERROR: Resolver configuration is not readable"
+        return 1
+    }
+    while IFS= read -r ns; do
+        [ -n "$ns" ] || continue
+        found=1
+        if ! valid_resolver_address "$ns"; then
+            log "ERROR: Non-numeric or malformed resolver in resolver configuration"
+            return 1
+        fi
+        case "$ns" in
+            127.*|0.0.0.0|::|::1)
+                log "ERROR: Loopback/unspecified resolver is not allowed; Docker embedded DNS is unsupported"
+                return 1
+                ;;
+        esac
+    done <<EOF
+$(awk '$1 == "nameserver" { print $2 }' "$RESOLV_CONF" 2>/dev/null)
+EOF
+    [ "$found" -eq 1 ] || {
+        log "ERROR: No numeric DNS resolver is configured"
+        return 1
+    }
+}
+
 # fwmark of the tunnel's sockets; empty while the tunnel is down
 tunnel_mark() {
     m=$(awg show "$TUNNEL_IF" fwmark 2>/dev/null)
@@ -65,6 +135,20 @@ ruleset() {
     echo "*filter"
     echo ":$CHAIN - [0:0]"
     echo "-F $CHAIN"
+    if [ "$fam" = 4 ]; then
+        echo "-A $CHAIN -p udp -d 127.0.0.11 --dport 53 -j REJECT --reject-with $reject"
+        echo "-A $CHAIN -p tcp -d 127.0.0.11 --dport 53 -j REJECT --reject-with $reject"
+    fi
+    for ns in $(resolvers "$fam"); do
+        if [ "$dns" = 1 ]; then
+            echo "-A $CHAIN -p udp -m owner --uid-owner 65532 -d $ns --dport 53 -j ACCEPT"
+            echo "-A $CHAIN -p tcp -m owner --uid-owner 65532 -d $ns --dport 53 -j ACCEPT"
+        fi
+    done
+    echo "-A $CHAIN -o $TUNNEL_IF -p udp --dport 53 -j ACCEPT"
+    echo "-A $CHAIN -o $TUNNEL_IF -p tcp --dport 53 -j ACCEPT"
+    echo "-A $CHAIN -p udp --dport 53 -j REJECT --reject-with $reject"
+    echo "-A $CHAIN -p tcp --dport 53 -j REJECT --reject-with $reject"
     echo "-A $CHAIN -o lo -j ACCEPT"
     for net in $(lan_networks "$fam"); do
         echo "-A $CHAIN -d $net -j ACCEPT"
@@ -79,12 +163,6 @@ ruleset() {
     mark=$(tunnel_mark)
     if [ -n "$mark" ]; then
         echo "-A $CHAIN -p udp -m mark --mark $mark -j ACCEPT"
-    fi
-    if [ "$dns" = 1 ]; then
-        for ns in $(resolvers "$fam"); do
-            echo "-A $CHAIN -p udp -d $ns --dport 53 -j ACCEPT"
-            echo "-A $CHAIN -p tcp -d $ns --dport 53 -j ACCEPT"
-        done
     fi
     echo "-A $CHAIN -j REJECT --reject-with $reject"
     echo "COMMIT"
@@ -107,6 +185,10 @@ case "${1:-}" in
         exit 2
         ;;
 esac
+
+if ! validate_resolver_config; then
+    exit 1
+fi
 
 if ! apply_family 4 "$DNS"; then
     log "ERROR: IPv4 kill switch could not be applied"

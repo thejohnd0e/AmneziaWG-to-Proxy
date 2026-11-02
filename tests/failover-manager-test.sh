@@ -381,6 +381,285 @@ test_awg_up_timeout_keeps_config_and_does_not_mark_active() {
     echo "PASS: awg-quick startup is bounded without quarantining the config"
 }
 
+test_hostname_endpoints_are_resolved_before_awg_and_source_is_unchanged() {
+    root="$TMP_ROOT/endpoint-resolution-order"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    cat > "$root/configs/a.conf" <<'EOF'
+[Interface]
+PrivateKey = synthetic-private-key
+[Peer]
+PublicKey = synthetic-peer-key
+Endpoint = endpoint.example:51820
+AllowedIPs = 0.0.0.0/0
+[Peer]
+PublicKey = second-peer-key
+Endpoint = 198.51.100.10:51821
+AllowedIPs = 10.0.0.0/8
+[Peer]
+PublicKey = third-peer-key
+Endpoint = endpoint6.example:51822
+AllowedIPs = 192.0.2.0/24
+[Peer]
+PublicKey = fourth-peer-key
+Endpoint = [2001:db8::9]:51823
+AllowedIPs = 198.18.0.0/15
+EOF
+    cp "$root/configs/a.conf" "$root/source.before"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'printf "resolve %s\\n" "$1" >> "$EVENTS"' \
+        'case "$1" in endpoint.example) printf "%s\\n" 203.0.113.44 ;; endpoint6.example) printf "%s\\n" 2001:db8::44 ;; *) exit 1 ;; esac' > "$root/bin/resolve-endpoint"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'printf "su-exec %s\\n" "$*" >> "$EVENTS"' \
+        'shift 1' \
+        'exec "$@"' > "$root/bin/su-exec"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        '[ "$1" = up ] || exit 0' \
+        'printf "awg up\\n" >> "$EVENTS"' \
+        'cat "$WG_CONF" > "$STAGED_CAPTURE"' > "$root/bin/awg-quick"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/check-tunnel"
+    printf '%s\n' '#!/bin/sh' 'echo "0.001 0.050"' > "$root/bin/curl"
+    chmod +x "$root/bin"/*
+
+    export EVENTS="$root/events" KS_LOG="$root/events" STAGED_CAPTURE="$root/staged.conf"
+    RESOLVE_ENDPOINT="$root/bin/resolve-endpoint" \
+    PATH="$root/bin:$PATH" \
+    SPEED_TEST=0 \
+        run_restart_manager "$root"
+    wait_for_file "$root/active"
+    stop_manager
+
+    cmp -s "$root/configs/a.conf" "$root/source.before" \
+        || fail "endpoint staging modified the source config"
+    grep -Fq 'Endpoint = 203.0.113.44:51820' "$root/staged.conf" \
+        || fail "hostname endpoint was not replaced in the staged config"
+    grep -Fq 'Endpoint = 198.51.100.10:51821' "$root/staged.conf" \
+        || fail "literal endpoint changed unexpectedly"
+    grep -Fq 'Endpoint = [2001:db8::44]:51822' "$root/staged.conf" \
+        || fail "IPv6 hostname answer was not staged as a bracketed endpoint"
+    grep -Fq 'Endpoint = [2001:db8::9]:51823' "$root/staged.conf" \
+        || fail "literal bracketed IPv6 endpoint changed unexpectedly"
+    grep -Fq 'killswitch dns-open' "$root/events" \
+        || fail "hostname resolution did not open the scoped DNS window"
+    grep -Fq 'killswitch apply' "$root/events" \
+        || fail "DNS exception was not closed"
+    dns_open_line=$(grep -nF 'killswitch dns-open' "$root/events" | head -1 | cut -d: -f1)
+    resolve_line=$(grep -nF 'resolve endpoint.example' "$root/events" | head -1 | cut -d: -f1)
+    dns_close_line=$(grep -nF 'killswitch apply' "$root/events" | head -1 | cut -d: -f1)
+    awg_up_line=$(grep -nF 'awg up' "$root/events" | head -1 | cut -d: -f1)
+    [ "$dns_open_line" -lt "$resolve_line" ] \
+        && [ "$resolve_line" -lt "$dns_close_line" ] \
+        && [ "$dns_close_line" -lt "$awg_up_line" ] \
+        || fail "required order is dns-open, resolve, dns-close, awg up"
+    unset EVENTS KS_LOG STAGED_CAPTURE
+    echo "PASS: hostname endpoints resolve under the scoped window before AWG; source config is unchanged"
+}
+
+test_numeric_endpoint_does_not_open_dns() {
+    root="$TMP_ROOT/numeric-endpoint-no-dns"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = synthetic' '[Peer]' 'Endpoint = 198.51.100.12:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a.conf"
+    make_success_commands "$root/bin"
+    export KS_LOG="$root/events"
+    run_restart_manager "$root"
+    wait_for_file "$root/active"
+    stop_manager
+    if grep -Fq 'killswitch dns-open' "$root/events"; then
+        fail "literal numeric endpoint must not open DNS"
+    fi
+    unset KS_LOG
+    echo "PASS: numeric endpoint does not open DNS"
+}
+
+test_malformed_endpoint_is_rejected_without_dns_or_quarantine() {
+    root="$TMP_ROOT/malformed-endpoint"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = synthetic' '[Peer]' 'Endpoint = [2001:db8::9:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a.conf"
+    make_success_commands "$root/bin"
+    export KS_LOG="$root/events"
+
+    SPEED_TEST=0 run_restart_manager "$root"
+    wait_for_log "$root/manager.log" "Unsupported bracketed IPv6 Endpoint syntax"
+    stop_manager
+
+    [ -f "$root/configs/a.conf" ] || fail "malformed Endpoint syntax quarantined the config"
+    [ ! -f "$root/active" ] || fail "malformed Endpoint syntax published readiness"
+    ! grep -Fq 'killswitch dns-open' "$root/events" 2>/dev/null || fail "malformed numeric syntax opened DNS"
+    ! grep -Fq 'awg-quick up' "$root/events" 2>/dev/null || fail "malformed Endpoint syntax started AWG"
+    unset KS_LOG
+    echo "PASS: malformed Endpoint syntax fails closed without DNS or quarantine"
+}
+
+test_unusable_and_noncanonical_numeric_endpoints_are_rejected() {
+    case_number=0
+    for endpoint in '[::]:51820' '[0:0:0:0:0:0:0:0]:51820' '[::1]]:51820' '010.0.0.1:51820'; do
+        case_number=$((case_number + 1))
+        root="$TMP_ROOT/unusable-endpoint-$case_number"
+        mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+        printf '%s\n' '[Interface]' 'PrivateKey = synthetic' '[Peer]' "Endpoint = $endpoint" 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a.conf"
+        make_success_commands "$root/bin"
+        export KS_LOG="$root/events"
+
+        SPEED_TEST=0 run_restart_manager "$root"
+        case "$endpoint" in
+            '[::]:51820') expected_error='Unsupported bracketed IPv6 Endpoint syntax' ;;
+            '[0:0:0:0:0:0:0:0]:51820') expected_error='Unsupported bracketed IPv6 Endpoint syntax' ;;
+            '[::1]]:51820') expected_error='Unsupported bracketed IPv6 Endpoint syntax' ;;
+            '010.0.0.1:51820') expected_error='Invalid Endpoint host syntax' ;;
+        esac
+        wait_for_log "$root/manager.log" "$expected_error"
+        stop_manager
+
+        [ -f "$root/configs/a.conf" ] || fail "invalid numeric endpoint [$endpoint] quarantined its config"
+        [ ! -f "$root/active" ] || fail "invalid numeric endpoint [$endpoint] published readiness"
+        ! grep -Fq 'killswitch dns-open' "$root/events" 2>/dev/null || fail "invalid numeric endpoint [$endpoint] opened DNS"
+        ! grep -Fq 'awg-quick up' "$root/events" 2>/dev/null || fail "invalid numeric endpoint [$endpoint] started AWG"
+    done
+    unset KS_LOG
+    echo "PASS: unspecified IPv6, malformed brackets and noncanonical IPv4 endpoints are rejected"
+}
+
+test_endpoint_dns_failure_closes_window_without_quarantining_config() {
+    root="$TMP_ROOT/endpoint-dns-failure"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = synthetic' '[Peer]' 'Endpoint = missing.example:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a.conf"
+    cp "$root/configs/a.conf" "$root/source.before"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' '[ "$1" = up ] || exit 0' 'echo "awg-quick up" >> "$EVENTS"' 'exit 0' > "$root/bin/awg-quick"
+    printf '%s\n' '#!/bin/sh' 'shift 1' 'exec "$@"' > "$root/bin/su-exec"
+    printf '%s\n' '#!/bin/sh' 'exit 1' > "$root/bin/resolve-endpoint"
+    chmod +x "$root/bin/su-exec" "$root/bin/resolve-endpoint"
+    export EVENTS="$root/events" KS_LOG="$root/events"
+
+    RESOLVE_ENDPOINT="$root/bin/resolve-endpoint" PATH="$root/bin:$PATH" run_restart_manager "$root"
+    wait_for_log "$root/manager.log" "Endpoint DNS resolution failed"
+    stop_manager
+
+    cmp -s "$root/configs/a.conf" "$root/source.before" \
+        || fail "DNS failure modified the source config"
+    assert_file_exists "$root/configs/a.conf"
+    assert_no_configs "$root/bad"
+    [ ! -f "$root/active" ] || fail "DNS failure must not publish readiness"
+    ! grep -Fq 'awg-quick up' "$root/events" \
+        || fail "AWG must not start after endpoint DNS failure"
+    expected=$(printf '%s\n' 'killswitch dns-open' 'killswitch apply')
+    [ "$(head -n 2 "$root/events")" = "$expected" ] \
+        || fail "DNS permission was not closed after resolution failure"
+    unset EVENTS KS_LOG
+    echo "PASS: endpoint DNS failure closes the window and preserves source config"
+}
+
+test_endpoint_dns_failure_does_not_strike_config_when_alternative_activates() {
+    root="$TMP_ROOT/endpoint-dns-no-strike"
+    mkdir -p "$root/configs" "$root/bad/.strikes" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = dns' '[Peer]' 'Endpoint = missing.example:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a-dns.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = good' '[Peer]' 'Endpoint = 198.51.100.14:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/b-good.conf"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' 'shift 1' 'exec "$@"' > "$root/bin/su-exec"
+    printf '%s\n' '#!/bin/sh' 'exit 1' > "$root/bin/resolve-endpoint"
+    chmod +x "$root/bin/su-exec" "$root/bin/resolve-endpoint"
+
+    RESOLVE_ENDPOINT="$root/bin/resolve-endpoint" PATH="$root/bin:$PATH" SPEED_TEST=0 FAST_START=0 run_restart_manager "$root"
+    wait_for_file "$root/active"
+    grep -Fq 'b-good.conf' "$root/active" || fail "expected the valid alternative to activate"
+    stop_manager
+
+    [ ! -f "$root/bad/.strikes/a-dns.conf" ] \
+        || fail "endpoint DNS failure must not add a persistent config strike"
+    [ -f "$root/configs/a-dns.conf" ] \
+        || fail "endpoint DNS failure must not quarantine the source config"
+    echo "PASS: endpoint DNS failure does not strike or quarantine a config when an alternative activates"
+}
+
+test_endpoint_dns_timeout_is_bounded_and_cleans_up() {
+    root="$TMP_ROOT/endpoint-dns-timeout"
+    mkdir -p "$root/configs" "$root/bad/.strikes" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = synthetic' '[Peer]' 'Endpoint = slow.example:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a.conf"
+    cp "$root/configs/a.conf" "$root/source.before"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' 'shift 1' 'exec "$@"' > "$root/bin/su-exec"
+    printf '%s\n' '#!/bin/sh' 'sleep 30' 'echo 203.0.113.10' > "$root/bin/resolve-endpoint"
+    chmod +x "$root/bin/su-exec" "$root/bin/resolve-endpoint"
+    export EVENTS="$root/events" KS_LOG="$root/events"
+
+    started=$(date +%s)
+    RESOLVE_ENDPOINT="$root/bin/resolve-endpoint" PATH="$root/bin:$PATH" run_restart_manager "$root"
+    wait_for_log "$root/manager.log" "Endpoint DNS resolution failed"
+    elapsed=$(($(date +%s) - started))
+    stop_manager
+
+    [ "$elapsed" -lt 15 ] || fail "endpoint resolution exceeded its 10-second bound (+$elapsed seconds)"
+    cmp -s "$root/configs/a.conf" "$root/source.before" \
+        || fail "DNS timeout modified the source config"
+    [ -f "$root/configs/a.conf" ] || fail "DNS timeout quarantined the config"
+    [ ! -f "$root/bad/.strikes/a.conf" ] || fail "DNS timeout added a strike"
+    [ ! -f "$root/active" ] || fail "DNS timeout published readiness"
+    ! grep -Fq 'awg-quick up' "$root/events" || fail "AWG started after DNS timeout"
+    [ "$(head -n 2 "$root/events")" = "$(printf '%s\n' 'killswitch dns-open' 'killswitch apply')" ] \
+        || fail "DNS timeout did not close its permission window"
+    unset EVENTS KS_LOG
+    echo "PASS: endpoint DNS timeout is bounded, closes permission and preserves config"
+}
+
+test_term_during_endpoint_resolution_closes_window_and_cleans_staging() {
+    root="$TMP_ROOT/endpoint-dns-signal"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = synthetic' '[Peer]' 'Endpoint = slow.example:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a.conf"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' 'shift 1' 'exec "$@"' > "$root/bin/su-exec"
+    printf '%s\n' '#!/bin/sh' 'echo $$ > "$RESOLVER_PID_FILE"' 'sleep 30' 'echo 203.0.113.10' > "$root/bin/resolve-endpoint"
+    chmod +x "$root/bin/su-exec" "$root/bin/resolve-endpoint"
+    export EVENTS="$root/events" KS_LOG="$root/events" RESOLVER_PID_FILE="$root/resolver.pid"
+
+    RESOLVE_ENDPOINT="$root/bin/resolve-endpoint" PATH="$root/bin:$PATH" run_restart_manager "$root"
+    manager_pid="$MANAGER_PID"
+    wait_for_file "$root/resolver.pid"
+    kill -TERM "$MANAGER_PID"
+    wait "$MANAGER_PID" 2>/dev/null || true
+    MANAGER_PID=""
+
+    [ "$(tail -n 1 "$root/events")" = 'killswitch apply' ] \
+        || fail "TERM did not close the DNS permission window"
+    [ ! -f "$root/active" ] || fail "TERM during DNS resolution left readiness active"
+    [ ! -f "$root/wg/wg0.conf.stage.$manager_pid" ] \
+        || fail "TERM left a staged source config"
+    [ ! -f "$root/wg/wg0.conf.resolved.$manager_pid" ] \
+        || fail "TERM left a staged resolved config"
+    if kill -0 "$(cat "$root/resolver.pid")" 2>/dev/null; then
+        fail "TERM left the resolver helper running"
+    fi
+    unset EVENTS KS_LOG RESOLVER_PID_FILE
+    echo "PASS: TERM during endpoint resolution closes DNS and cleans helper/staging state"
+}
+
+test_failed_dns_cleanup_terminates_manager_before_awg() {
+    root="$TMP_ROOT/endpoint-dns-close-failure"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = synthetic' '[Peer]' 'Endpoint = endpoint.example:51820' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a.conf"
+    make_success_commands "$root/bin"
+    printf '%s\n' '#!/bin/sh' '[ "$1" = up ] || exit 0' 'echo "awg-quick up" >> "$EVENTS"' 'exit 0' > "$root/bin/awg-quick"
+    printf '%s\n' '#!/bin/sh' 'shift 1' 'exec "$@"' > "$root/bin/su-exec"
+    printf '%s\n' '#!/bin/sh' 'echo 203.0.113.10' > "$root/bin/resolve-endpoint"
+    chmod +x "$root/bin/su-exec" "$root/bin/resolve-endpoint"
+    export EVENTS="$root/events" KS_LOG="$root/events" KS_APPLY_STATUS=1
+
+    RESOLVE_ENDPOINT="$root/bin/resolve-endpoint" PATH="$root/bin:$PATH" run_restart_manager "$root"
+    wait "$MANAGER_PID"
+    status=$?
+    MANAGER_PID=""
+    unset EVENTS KS_LOG KS_APPLY_STATUS
+
+    [ "$status" -eq 1 ] || fail "DNS cleanup failure must terminate the manager"
+    grep -q 'Could not close endpoint DNS permission' "$root/manager.log" \
+        || fail "expected DNS cleanup failure to be reported"
+    ! grep -Fq 'awg-quick up' "$root/events" \
+        || fail "AWG must not start until the DNS exception is closed"
+    [ ! -f "$root/active" ] || fail "DNS cleanup failure must not publish readiness"
+    echo "PASS: DNS cleanup failure fails closed before AWG startup"
+}
+
 test_config_paths_with_spaces_and_backslashes_survive_ranking() {
     root="$TMP_ROOT/special-config-paths"
     mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
@@ -432,6 +711,7 @@ wait_for_log() {
         sleep 0.1
         attempts=$((attempts + 1))
     done
+    grep -q "$pattern" "$file" 2>/dev/null || fail "timed out waiting for log pattern [$pattern] in $file: $(cat "$file" 2>/dev/null)"
 }
 
 # Fakes for the restart tests. awg-quick counts "up" calls; check-tunnel fails
@@ -703,7 +983,7 @@ make_logging_commands() {
     chmod +x "$root/bin/awg-quick"
 }
 
-test_tunnel_is_brought_up_inside_kill_switch_window() {
+test_numeric_tunnel_start_does_not_open_dns() {
     root="$TMP_ROOT/kill-switch-order"
     mkdir -p "$root/configs" "$root/bad" "$root/wg"
     printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
@@ -715,20 +995,23 @@ test_tunnel_is_brought_up_inside_kill_switch_window() {
     stop_manager
     unset KS_LOG
 
-    expected=$(printf '%s\n' 'killswitch dns-open' 'awg-quick up' 'killswitch apply')
-    [ "$(head -n 3 "$root/calls.log")" = "$expected" ] \
-        || fail "expected dns-open, awg-quick up, apply in that order, got: $(cat "$root/calls.log")"
-    echo "PASS: tunnel is brought up inside the kill switch window"
+    expected=$(printf '%s\n' 'awg-quick up' 'killswitch apply')
+    [ "$(head -n 2 "$root/calls.log")" = "$expected" ] \
+        || fail "numeric endpoint must start without DNS exception, got: $(cat "$root/calls.log")"
+    echo "PASS: numeric endpoint starts without opening DNS"
 }
 
 test_tunnel_is_not_started_when_kill_switch_cannot_be_armed() {
     root="$TMP_ROOT/kill-switch-unarmed"
     mkdir -p "$root/configs" "$root/bad" "$root/wg"
-    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' '[Peer]' 'Endpoint = endpoint.example:51820' > "$root/configs/a.conf"
     make_logging_commands "$root"
+    printf '%s\n' '#!/bin/sh' 'shift 1' 'exec "$@"' > "$root/bin/su-exec"
+    printf '%s\n' '#!/bin/sh' 'echo 203.0.113.10' > "$root/bin/resolve-endpoint"
+    chmod +x "$root/bin/su-exec" "$root/bin/resolve-endpoint"
 
     export KS_LOG="$root/calls.log" KS_DNS_STATUS=1
-    run_restart_manager "$root"
+    RESOLVE_ENDPOINT="$root/bin/resolve-endpoint" PATH="$root/bin:$PATH" run_restart_manager "$root"
     wait "$MANAGER_PID"
     status=$?
     MANAGER_PID=""
@@ -738,8 +1021,8 @@ test_tunnel_is_not_started_when_kill_switch_cannot_be_armed() {
     if grep -q 'awg-quick up' "$root/calls.log" 2>/dev/null; then
         fail "tunnel must not start while the kill switch is not armed"
     fi
-    grep -q "Kill switch could not be armed" "$root/manager.log" \
-        || fail "expected the unarmed kill switch to be reported"
+    grep -q "Could not open scoped endpoint DNS permission" "$root/manager.log" \
+        || fail "expected the scoped DNS setup failure to be reported"
     [ ! -f "$root/active" ] || fail "no config may become active without a kill switch"
     echo "PASS: tunnel is not started when the kill switch cannot be armed"
 }
@@ -758,8 +1041,8 @@ test_tunnel_is_torn_down_when_kill_switch_cannot_be_finalized() {
     unset KS_LOG KS_APPLY_STATUS
 
     [ "$status" -eq 1 ] || fail "expected the manager to stop with status 1, got $status"
-    expected=$(printf '%s\n' 'killswitch dns-open' 'awg-quick up' 'killswitch apply' 'awg-quick down')
-    [ "$(head -n 4 "$root/calls.log")" = "$expected" ] \
+    expected=$(printf '%s\n' 'awg-quick up' 'killswitch apply' 'awg-quick down')
+    [ "$(head -n 3 "$root/calls.log")" = "$expected" ] \
         || fail "expected the tunnel to be taken down after a failed finalize, got: $(cat "$root/calls.log")"
     [ ! -f "$root/active" ] || fail "no config may become active without a finalized kill switch"
     echo "PASS: tunnel is taken down when the kill switch cannot be finalized"
@@ -768,7 +1051,7 @@ test_tunnel_is_torn_down_when_kill_switch_cannot_be_finalized() {
 test_all_awg_start_failures_preserve_every_config_and_strike() {
     root="$TMP_ROOT/start-failure-outage"
     mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin" "$root/bad/.strikes"
-    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' '[Peer]' 'Endpoint = 198.51.100.11:51820' > "$root/configs/a.conf"
     printf '%s\n' '[Interface]' 'PrivateKey = b' > "$root/configs/b.conf"
     printf '%s\n' '2' > "$root/bad/.strikes/a.conf"
     make_success_commands "$root/bin"
@@ -792,7 +1075,7 @@ test_all_awg_start_failures_preserve_every_config_and_strike() {
 test_all_health_failures_preserve_existing_strikes() {
     root="$TMP_ROOT/health-failure-outage"
     mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin" "$root/bad/.strikes"
-    printf '%s\n' '[Interface]' 'PrivateKey = a' > "$root/configs/a.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = a' '[Peer]' 'Endpoint = 198.51.100.11:51820' > "$root/configs/a.conf"
     printf '%s\n' '[Interface]' 'PrivateKey = b' > "$root/configs/b.conf"
     printf '%s\n' '2' > "$root/bad/.strikes/a.conf"
     make_success_commands "$root/bin"
@@ -870,6 +1153,15 @@ test_fastest_config_is_selected
 test_failed_latency_probe_sorts_after_measured_candidates
 test_split_tunnel_candidates_are_retained_and_skipped
 test_awg_up_timeout_keeps_config_and_does_not_mark_active
+test_hostname_endpoints_are_resolved_before_awg_and_source_is_unchanged
+test_numeric_endpoint_does_not_open_dns
+test_malformed_endpoint_is_rejected_without_dns_or_quarantine
+test_unusable_and_noncanonical_numeric_endpoints_are_rejected
+test_endpoint_dns_failure_closes_window_without_quarantining_config
+test_endpoint_dns_failure_does_not_strike_config_when_alternative_activates
+test_endpoint_dns_timeout_is_bounded_and_cleans_up
+test_term_during_endpoint_resolution_closes_window_and_cleans_staging
+test_failed_dns_cleanup_terminates_manager_before_awg
 test_config_paths_with_spaces_and_backslashes_survive_ranking
 test_dead_tunnel_is_restarted_not_quarantined
 test_startup_probes_wait_longer_than_monitoring
@@ -879,7 +1171,7 @@ test_failed_health_check_is_quarantined_only_after_repeated_strikes
 test_ranking_stops_after_budget_once_a_config_works
 test_fast_start_uses_last_working_config
 test_fast_start_falls_back_to_ranking
-test_tunnel_is_brought_up_inside_kill_switch_window
+test_numeric_tunnel_start_does_not_open_dns
 test_tunnel_is_not_started_when_kill_switch_cannot_be_armed
 test_tunnel_is_torn_down_when_kill_switch_cannot_be_finalized
 test_all_awg_start_failures_preserve_every_config_and_strike

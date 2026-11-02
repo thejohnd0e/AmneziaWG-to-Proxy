@@ -17,7 +17,10 @@ CHAIN=AWG_KILLSWITCH
 NS="ks-test-$$"
 CLIENT_NS="${NS}-client"
 TMP_ROOT=$(mktemp -d)
+chmod 777 "$TMP_ROOT"
 N="ip netns exec $NS"
+DNS_SERVER_PID=""
+DNS_CLIENT_PID=""
 
 fail() {
     echo "FAIL: $1" >&2
@@ -25,6 +28,10 @@ fail() {
 }
 
 cleanup() {
+    [ -z "$DNS_CLIENT_PID" ] || kill "$DNS_CLIENT_PID" 2>/dev/null || true
+    [ -z "$DNS_SERVER_PID" ] || kill "$DNS_SERVER_PID" 2>/dev/null || true
+    [ -z "$DNS_CLIENT_PID" ] || wait "$DNS_CLIENT_PID" 2>/dev/null || true
+    [ -z "$DNS_SERVER_PID" ] || wait "$DNS_SERVER_PID" 2>/dev/null || true
     ip netns del "$NS" 2>/dev/null || true
     ip netns del "$CLIENT_NS" 2>/dev/null || true
     rm -rf "$TMP_ROOT"
@@ -47,7 +54,7 @@ printf '%s\n' \
 chmod +x "$TMP_ROOT/bin/awg"
 export PATH="$TMP_ROOT/bin:$PATH"
 
-printf '%s\n' 'nameserver 192.0.2.53' > "$TMP_ROOT/resolv.conf"
+printf '%s\n' 'nameserver 192.168.0.53' > "$TMP_ROOT/resolv.conf"
 export RESOLV_CONF="$TMP_ROOT/resolv.conf"
 
 ip netns add "$NS" || fail "cannot create network namespace $NS"
@@ -64,8 +71,10 @@ ip link set ks-client netns "$CLIENT_NS"
 $N ip addr add 10.200.0.1/24 dev ks-proxy
 $N ip link set ks-proxy up
 ip netns exec "$CLIENT_NS" ip addr add 10.200.0.2/24 dev ks-client
+ip netns exec "$CLIENT_NS" ip addr add 192.168.0.53/32 dev ks-client
 ip netns exec "$CLIENT_NS" ip link set lo up
 ip netns exec "$CLIENT_NS" ip link set ks-client up
+$N ip route add 192.168.0.53/32 via 10.200.0.2 dev ks-proxy
 
 # Mirrors what awg-quick sets up: wg0, table 51820 and the two policy rules
 tunnel_up() {
@@ -120,6 +129,56 @@ printf '%s\n' \
     '    s.sendto(b"x", (sys.argv[2], int(sys.argv[3])))' \
     'except OSError:' \
     '    pass' > "$TMP_ROOT/udp-send.py"
+
+printf '%s\n' \
+    'import os, socket, sys' \
+    'uid = int(sys.argv[1])' \
+    'os.setuid(uid) if uid else None' \
+    's = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)' \
+    'target = sys.argv[2] if len(sys.argv) > 2 else "192.168.0.53"' \
+    's.sendto(b"\x00" * 12, (target, 53))' > "$TMP_ROOT/dns-send.py"
+
+cat > "$TMP_ROOT/dns-tcp-server.py" <<'EOF'
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("192.168.0.53", 53))
+s.listen(1)
+c, _ = s.accept()
+c.recv(16)
+open(sys.argv[1], "w").close()
+while c.recv(1024):
+    pass
+c.close()
+s.close()
+EOF
+
+cat > "$TMP_ROOT/dns-tcp-client.py" <<'EOF'
+import os, socket, sys, time
+os.setuid(65532)
+s = socket.create_connection(("192.168.0.53", 53), 2)
+s.sendall(b"first")
+open(sys.argv[1], "w").close()
+while not os.path.exists(sys.argv[2]):
+    time.sleep(0.01)
+try:
+    s.sendall(b"after-close")
+except OSError:
+    open(sys.argv[3], "w").close()
+s.close()
+EOF
+
+dns_helper_packets() {
+    $N iptables -nvxL "$CHAIN" | awk '/owner UID match 65532/ { total += $1 } END { print total + 0 }'
+}
+
+dns_reject_packets() {
+    $N iptables -nvxL "$CHAIN" | awk '/REJECT/ && /dpt:53/ { total += $1 } END { print total + 0 }'
+}
+
+dns_tcp_reject_packets() {
+    $N iptables -nvxL "$CHAIN" | awk '/REJECT/ && /tcp dpt:53/ { total += $1 } END { print total + 0 }'
+}
 
 # probe_tunnel_socket TARGET: one marked UDP datagram, as the tunnel would send it
 probe_tunnel_socket() {
@@ -183,6 +242,13 @@ EOF
 test_tunnel_carries_public_traffic() {
     tunnel_up
     apply
+    e0=$(tx eth0)
+    w0=$(tx wg0)
+    $N python3 "$TMP_ROOT/dns-send.py" 0 1.1.1.1 >/dev/null 2>&1 || fail "could not send synthetic DNS on the tunnel"
+    [ "$(( $(tx wg0) - w0 ))" -ge 1 ] \
+        || fail "proxy DNS did not leave through wg0 while the tunnel was up"
+    [ "$(( $(tx eth0) - e0 ))" = 0 ] \
+        || fail "proxy DNS escaped through eth0 while the tunnel was up"
     probe 169.254.169.254
     [ "$PROBE_ETH0" = 0 ] && [ "$PROBE_WG0" = 0 ] \
         || fail "metadata traffic escaped via the tunnel or eth0"
@@ -237,14 +303,53 @@ test_apply_is_idempotent() {
 }
 
 test_dns_window_opens_and_closes() {
-    $N sh "$KILLSWITCH" dns-open || fail "dns-open failed"
-    $N iptables -S "$CHAIN" | grep -q -- "-d 192.0.2.53/32 -p udp -m udp --dport 53 -j ACCEPT" \
-        || fail "dns-open did not allow DNS to the resolver"
+    LAN_NETWORK=192.168.0.0/16 $N sh "$KILLSWITCH" dns-open || fail "dns-open failed"
+    $N iptables -S "$CHAIN" | grep -q -- "-d 192.168.0.53/32 -p udp -m owner --uid-owner 65532 -m udp --dport 53 -j ACCEPT" \
+        || fail "dns-open did not allow DNS to the resolver: $($N iptables -S "$CHAIN")"
+    helper_before=$(dns_helper_packets)
+    reject_before=$(dns_reject_packets)
+    $N python3 "$TMP_ROOT/dns-send.py" 65532 || fail "could not send a resolver-UID DNS packet"
+    $N python3 "$TMP_ROOT/dns-send.py" 0 >/dev/null 2>&1 || true
+    helper_after=$(dns_helper_packets)
+    reject_after=$(dns_reject_packets)
+    [ "$helper_after" -gt "$helper_before" ] \
+        || fail "resolver UID packet did not match the scoped DNS exception"
+    [ "$reject_after" -gt "$reject_before" ] \
+        || fail "non-resolver packet to a private DNS server did not hit rejection despite LAN allow"
+    reject_before_loopback=$(dns_reject_packets)
+    $N python3 "$TMP_ROOT/dns-send.py" 0 127.0.0.1 >/dev/null 2>&1 || true
+    reject_after_loopback=$(dns_reject_packets)
+    [ "$reject_after_loopback" -gt "$reject_before_loopback" ] \
+        || fail "non-resolver DNS to a loopback stub bypassed DNS rejection"
+    ip netns exec "$CLIENT_NS" python3 "$TMP_ROOT/dns-tcp-server.py" "$TMP_ROOT/tcp-server-ready" >"$TMP_ROOT/tcp-server.log" 2>&1 &
+    DNS_SERVER_PID=$!
+    $N python3 "$TMP_ROOT/dns-tcp-client.py" "$TMP_ROOT/tcp-client-ready" "$TMP_ROOT/tcp-go" "$TMP_ROOT/tcp-blocked" >"$TMP_ROOT/tcp-client.log" 2>&1 &
+    DNS_CLIENT_PID=$!
+    attempts=0
+    while [ ! -f "$TMP_ROOT/tcp-client-ready" ] && [ "$attempts" -lt 50 ]; do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+    [ -f "$TMP_ROOT/tcp-client-ready" ] || fail "could not establish synthetic TCP DNS stream: $(cat "$TMP_ROOT/tcp-client.log" "$TMP_ROOT/tcp-server.log" 2>/dev/null)"
+    tcp_reject_before=$(dns_tcp_reject_packets)
     apply
-    if $N iptables -S "$CHAIN" | grep -q -- "192.0.2.53"; then
+    : > "$TMP_ROOT/tcp-go"
+    attempts=0
+    while [ "$(dns_tcp_reject_packets)" -le "$tcp_reject_before" ] && [ "$attempts" -lt 50 ]; do
+        sleep 0.1
+        attempts=$((attempts + 1))
+    done
+    tcp_reject_after=$(dns_tcp_reject_packets)
+    [ "$tcp_reject_after" -gt "$tcp_reject_before" ] \
+        || fail "an established TCP DNS stream bypassed closure"
+    kill "$DNS_CLIENT_PID" "$DNS_SERVER_PID" 2>/dev/null || true
+    wait "$DNS_CLIENT_PID" "$DNS_SERVER_PID" 2>/dev/null || true
+    DNS_CLIENT_PID=""
+    DNS_SERVER_PID=""
+    if $N iptables -S "$CHAIN" | grep -q -- "192.168.0.53"; then
         fail "DNS stayed open after apply"
     fi
-    echo "PASS: DNS is open only during dns-open"
+    echo "PASS: private resolver DNS is UID-scoped; proxy UID and established TCP DNS are blocked after closure"
 }
 
 test_no_tunnel_blocks_public_traffic

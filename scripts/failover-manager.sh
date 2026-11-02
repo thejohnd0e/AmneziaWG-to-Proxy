@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC3043 # Alpine's supported BusyBox ash and the test dash provide function-local variables.
 # failover-manager.sh — Background failover supervisor
 # Runs inside the container. Manages config selection, health monitoring,
 # and automatic switching to next config on failure.
@@ -15,6 +16,7 @@ WG_CONF="${WG_CONF:-/etc/amnezia/amneziawg/wg0.conf}"
 CHECK_TUNNEL="${CHECK_TUNNEL:-/check-tunnel.sh}"
 TUN_SETUP="${TUN_SETUP:-/ensure-tun.sh}"
 KILLSWITCH="${KILLSWITCH:-/killswitch.sh}"
+RESOLVE_ENDPOINT="${RESOLVE_ENDPOINT:-/resolve-endpoint.sh}"
 AWG_LOG="${AWG_LOG:-/tmp/awg-quick.log}"
 
 INTERVAL="${FAILOVER_INTERVAL:-15}"
@@ -146,9 +148,255 @@ has_full_tunnel_route() {
     ' "$1"
 }
 
-# The kill switch stays armed whether or not wg0 exists: only the tunnel, LAN and
-# the tunnel's own socket may leave. DNS is opened for the bring-up window only,
-# because awg-quick may need to resolve an Endpoint host name.
+is_ipv4_address() {
+    awk -F. '
+        NF != 4 { exit 1 }
+        {
+            for (i = 1; i <= 4; i++)
+                if ($i !~ /^[0-9]+$/ || length($i) > 3 || $i > 255 || ($i != "0" && substr($i, 1, 1) == "0")) exit 1
+        }
+    ' <<EOF
+$1
+EOF
+}
+
+is_ipv6_address() {
+    awk '
+        function groups(s, a, n, i) {
+            if (s == "") return 0
+            n = split(s, a, ":")
+            for (i = 1; i <= n; i++)
+                if (a[i] !~ /^[[:xdigit:]]+$/ || length(a[i]) > 4) return -100
+            return n
+        }
+        {
+            s = $0
+            if (s !~ /^[0-9A-Fa-f:]+$/ || s ~ /:::/) exit 1
+            p = index(s, "::")
+            if (p) {
+                left = substr(s, 1, p - 1)
+                right = substr(s, p + 2)
+                if (index(right, "::")) exit 1
+                n = groups(left) + groups(right)
+                if (n < 0 || n >= 8) exit 1
+            } else if (groups(s) != 8) exit 1
+            compact = s
+            gsub(/:/, "", compact)
+            if (compact == "" || compact ~ /^0+$/) exit 1
+        }
+    ' <<EOF
+$1
+EOF
+}
+
+valid_endpoint_hostname() {
+    local host="${1%.}"
+    case "$host" in
+        ''|.*|*..*|*[!A-Za-z0-9.-]*) return 1 ;;
+    esac
+    [ "${#host}" -le 253 ] || return 1
+    printf '%s\n' "$host" | awk -F. '{
+        for (i = 1; i <= NF; i++)
+            if (length($i) == 0 || length($i) > 63 || $i ~ /^-/ || $i ~ /-$/) exit 1
+    }'
+}
+
+parse_endpoint() {
+    local endpoint="$1" host port
+    ENDPOINT_HOST=""
+    ENDPOINT_PORT=""
+    ENDPOINT_KIND=""
+    case "$endpoint" in
+        \[* )
+            host=${endpoint#\[}
+            case "$host" in
+                *\]:*) ;;
+                *)
+                    log "ERROR: Unsupported bracketed IPv6 Endpoint syntax"
+                    return 1
+                    ;;
+            esac
+            port=${host#*\]:}
+            host=${host%%\]:*}
+            if ! is_ipv6_address "$host"; then
+                log "ERROR: Unsupported bracketed IPv6 Endpoint syntax"
+                return 1
+            fi
+            ENDPOINT_KIND=ipv6
+            ;;
+        *:*)
+            host=${endpoint%:*}
+            port=${endpoint##*:}
+            case "$host" in *:*)
+                log "ERROR: IPv6 Endpoint must be bracketed"
+                return 1
+                ;;
+            esac
+            case "$host" in
+                *\[*|*\]*)
+                    log "ERROR: Invalid Endpoint host syntax"
+                    return 1
+                    ;;
+            esac
+            if is_ipv4_address "$host"; then
+                ENDPOINT_KIND=ipv4
+            elif case "$host" in *[!0-9.]*) valid_endpoint_hostname "$host" ;; *) false ;; esac; then
+                ENDPOINT_KIND=hostname
+                host=${host%.}
+            else
+                log "ERROR: Invalid Endpoint host syntax"
+                return 1
+            fi
+            ;;
+        *)
+            log "ERROR: Endpoint must include a host and port"
+            return 1
+            ;;
+    esac
+    if ! printf '%s\n' "$port" | awk '$0 !~ /^[0-9]+$/ || $0 < 1 || $0 > 65535 { exit 1 }'; then
+        log "ERROR: Invalid Endpoint port"
+        return 1
+    fi
+    ENDPOINT_HOST="$host"
+    ENDPOINT_PORT="$port"
+}
+
+terminate_proxy_processes() {
+    local pids
+    pids=$(pidof privoxy microsocks 2>/dev/null || true)
+    [ -z "$pids" ] || kill $pids 2>/dev/null || true
+}
+
+close_dns_window() {
+    [ "$DNS_WINDOW_OPEN" = 1 ] || return 0
+    if ! "$KILLSWITCH" apply; then
+        log "FATAL: Could not close endpoint DNS permission; stopping proxies and tunnel"
+        DNS_WINDOW_OPEN=0
+        rm -f "$ACTIVE_MARKER"
+        awg-quick down wg0 > /dev/null 2>&1 || true
+        terminate_proxy_processes
+        exit 1
+    fi
+    DNS_WINDOW_OPEN=0
+}
+
+open_dns_window() {
+    command -v timeout > /dev/null 2>&1 || {
+        log "ERROR: timeout is required for endpoint DNS"
+        return 2
+    }
+    command -v su-exec > /dev/null 2>&1 || {
+        log "ERROR: su-exec is required for endpoint DNS"
+        return 2
+    }
+    [ -x "$RESOLVE_ENDPOINT" ] || {
+        log "ERROR: Endpoint resolver helper is missing or not executable"
+        return 2
+    }
+    DNS_WINDOW_OPEN=1
+    if ! "$KILLSWITCH" dns-open; then
+        log "ERROR: Could not open scoped endpoint DNS permission"
+        if ! "$KILLSWITCH" apply; then
+            log "FATAL: Could not restore kill switch after DNS setup failure"
+            terminate_proxy_processes
+            exit 1
+        fi
+        DNS_WINDOW_OPEN=0
+        return 2
+    fi
+    return 0
+}
+
+stage_config() {
+    local source="$1" stage="${WG_CONF}.stage.$$" output="${WG_CONF}.resolved.$$"
+    local line value endpoint resolved status prefix leading trailing
+    local dns_status=0
+    rm -f "$stage" "$output"
+    if ! cp "$source" "$stage" \
+        || ! sed -i '/^[[:space:]]*DNS[[:space:]]*=/d' "$stage" \
+        || ! chmod 600 "$stage"; then
+        log "ERROR: Could not stage $(basename "$source") at $WG_CONF"
+        rm -f "$stage" "$output"
+        return 2
+    fi
+    : > "$output" || {
+        rm -f "$stage" "$output"
+        return 2
+    }
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        if printf '%s\n' "$line" | grep -Eq '^[[:space:]]*Endpoint[[:space:]]*='; then
+            value=${line#*=}
+            leading=$(printf '%s' "$value" | sed 's/^\([[:space:]]*\).*$/\1/')
+            trailing=$(printf '%s' "$value" | sed 's/^.*\([[:space:]]*\)$/\1/')
+            value=$(printf '%s' "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if ! parse_endpoint "$value"; then
+                rm -f "$stage" "$output"
+                close_dns_window || return 2
+                return 3
+            fi
+            endpoint="$ENDPOINT_HOST:$ENDPOINT_PORT"
+            case "$ENDPOINT_KIND" in
+                ipv4) ;;
+                ipv6) endpoint="[$ENDPOINT_HOST]:$ENDPOINT_PORT" ;;
+                hostname)
+                    if [ "$DNS_WINDOW_OPEN" -eq 0 ]; then
+                        open_dns_window
+                        dns_status=$?
+                        if [ "$dns_status" -ne 0 ]; then
+                            rm -f "$stage" "$output"
+                            return "$dns_status"
+                        fi
+                    fi
+                    resolved=$(timeout -k 2 10 su-exec 65532:65532 "$RESOLVE_ENDPOINT" "$ENDPOINT_HOST")
+                    status=$?
+                    if [ "$status" -ne 0 ]; then
+                        log "Endpoint DNS resolution failed for $(basename "$source")"
+                        rm -f "$stage" "$output"
+                        close_dns_window || return 2
+                        return 4
+                    fi
+                    if ! is_ipv4_address "$resolved" && ! is_ipv6_address "$resolved"; then
+                        log "ERROR: Resolver helper returned an invalid address"
+                        rm -f "$stage" "$output"
+                        close_dns_window || return 2
+                        return 2
+                    fi
+                    if is_ipv6_address "$resolved"; then
+                        endpoint="[$resolved]:$ENDPOINT_PORT"
+                    else
+                        endpoint="$resolved:$ENDPOINT_PORT"
+                    fi
+                    ;;
+            esac
+            prefix=${line%%=*}
+            printf '%s=%s%s%s\n' "$prefix" "$leading" "$endpoint" "$trailing" >> "$output" || {
+                rm -f "$stage" "$output"
+                close_dns_window || return 2
+                return 2
+            }
+        else
+            printf '%s\n' "$line" >> "$output" || {
+                rm -f "$stage" "$output"
+                close_dns_window || return 2
+                return 2
+            }
+        fi
+    done < "$stage"
+    rm -f "$stage"
+    close_dns_window || {
+        rm -f "$output"
+        return 2
+    }
+    chmod 600 "$output" && mv -f "$output" "$WG_CONF" || {
+        log "ERROR: Could not install resolved tunnel config"
+        rm -f "$output"
+        return 2
+    }
+}
+
+# The kill switch stays armed whether or not wg0 exists. Hostname endpoints are
+# resolved in the scoped staging window; DNS is closed before awg-quick starts.
 start_tunnel() {
     local config_file="$1"
     local up_status=0
@@ -156,20 +404,9 @@ start_tunnel() {
         log "ERROR: $(basename "$config_file") has no 0.0.0.0/0 in AllowedIPs (split tunnel is not supported)"
         return 3
     fi
-    if ! cp "$config_file" "$WG_CONF"; then
-        log "ERROR: Could not stage $(basename "$config_file") at $WG_CONF"
-        return 2
-    fi
-    # Docker owns /etc/resolv.conf, so wg-quick must not invoke resolvconf.
-    if ! sed -i '/^[[:space:]]*DNS[[:space:]]*=/d' "$WG_CONF" \
-        || ! chmod 600 "$WG_CONF"; then
-        log "ERROR: Could not prepare $(basename "$config_file") at $WG_CONF"
-        return 2
-    fi
-    if ! "$KILLSWITCH" dns-open; then
-        log "ERROR: Kill switch could not be armed, not starting the tunnel"
-        return 2
-    fi
+    stage_config "$config_file"
+    local stage_status=$?
+    [ "$stage_status" -eq 0 ] || return "$stage_status"
     if ! command -v timeout > /dev/null 2>&1; then
         log "ERROR: timeout command is required to bound awg-quick up"
         "$KILLSWITCH" apply || log "ERROR: Kill switch could not be re-applied"
@@ -287,8 +524,12 @@ rank_configs() {
         if [ "$status" -eq 3 ]; then
             continue
         fi
+        if [ "$status" -eq 4 ]; then
+            log "Skipping $(basename "$config") after endpoint DNS failure without adding a strike"
+            continue
+        fi
         if [ "$status" -ne 0 ]; then
-            log "awg-quick failed for $(basename "$config")"
+            log "Candidate bring-up failed for $(basename "$config")"
             awg-quick down wg0 > /dev/null 2>&1
             record_pending_failure "$config"
             continue
@@ -340,7 +581,15 @@ fi
 
 echo "0" > "$FAILURE_FILE"
 discard_pending_failures
-trap 'rm -f "$ACTIVE_MARKER"; awg-quick down wg0 > /dev/null 2>&1; exit 0' INT TERM
+DNS_WINDOW_OPEN=0
+handle_signal() {
+    close_dns_window
+    rm -f "${WG_CONF}.stage.$$" "${WG_CONF}.resolved.$$"
+    rm -f "$ACTIVE_MARKER"
+    awg-quick down wg0 > /dev/null 2>&1
+    exit 0
+}
+trap 'handle_signal' INT TERM
 
 log "Failover manager started"
 log "Config dir: $CONFIG_DIR | Bad dir: $BAD_DIR"
@@ -403,8 +652,14 @@ while true; do
             [ -n "$RANKED" ] || sleep "$CONFIG_POLL_INTERVAL"
             continue
         fi
+        if [ "$START_STATUS" -eq 4 ]; then
+            log "Skipping $(basename "$CURRENT_CONFIG") after endpoint DNS failure without adding a strike"
+            CURRENT_CONFIG=""
+            [ -n "$RANKED" ] || sleep "$CONFIG_POLL_INTERVAL"
+            continue
+        fi
         if [ "$START_STATUS" -ne 0 ]; then
-            log "awg-quick failed for $(basename "$CURRENT_CONFIG")"
+            log "Candidate bring-up failed for $(basename "$CURRENT_CONFIG")"
             awg-quick down wg0 > /dev/null 2>&1
             record_pending_failure "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
