@@ -62,11 +62,12 @@ At startup the manager measures every config before connecting:
 - After `RANK_BUDGET` seconds (default `0`: the first working config wins) the ranking stops as soon as one config works,
   so a long list of dead configs cannot delay the proxy. Untested configs stay
   in `config/` and are tried in the next round.
-- The fastest working config becomes ACTIVE; the rest are kept ranked for failover.
+- The lowest-latency config among the candidates actually measured becomes ACTIVE
+  only when the ranking budget allows measuring them all. With default
+  `RANK_BUDGET=0`, the first working candidate becomes ACTIVE.
 
-This makes startup slower (roughly a few seconds per config) but selects the
-lowest-latency server. Set `SPEED_TEST=0` to disable ranking and use the
-first config by name instead.
+This can make startup slower when `RANK_BUDGET` is positive. Set `SPEED_TEST=0`
+to disable latency ranking and try configs in version-sorted name order.
 
 ## Health Check Details
 
@@ -78,6 +79,10 @@ Two independent endpoints are used:
 
 A round is successful if **any** endpoint responds.
 Both must fail for the round to count as a failure.
+
+The Docker healthcheck timeout is 20 seconds, leaving room for both default
+probes at eight seconds each. Increase it if `HEALTH_URLS` has more endpoints or
+the probe timeout is raised.
 
 This dual-endpoint approach prevents false positives when one service is temporarily unavailable.
 

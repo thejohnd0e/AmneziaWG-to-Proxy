@@ -38,6 +38,7 @@ services:
       QUARANTINE_AFTER: ${QUARANTINE_AFTER:-3}
       RANK_BUDGET: ${RANK_BUDGET:-0}
       STARTUP_TIMEOUT: ${STARTUP_TIMEOUT:-8}
+      AWG_UP_TIMEOUT: ${AWG_UP_TIMEOUT:-30}
       STARTUP_CHECKS: ${STARTUP_CHECKS:-1}
       FAST_START: ${FAST_START:-1}
       FAILOVER_TIMEOUT: ${FAILOVER_TIMEOUT:-8}
@@ -51,6 +52,6 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/active_config && /check-tunnel.sh"]
       interval: 30s
-      timeout: 15s
+      timeout: 20s
       retries: 3
       start_period: 60s

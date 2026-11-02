@@ -6,20 +6,28 @@
 TIMEOUT="${FAILOVER_TIMEOUT:-8}"
 URLS="${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}"
 
+OLD_IFS=$IFS
 IFS=','
 PROBE_LOG="/tmp/check-tunnel.$$.log"
 CURL_LOG="${PROBE_LOG}.curl"
-trap 'rm -f "$PROBE_LOG" "$CURL_LOG"' EXIT INT TERM
+cleanup() {
+    rm -f "$PROBE_LOG" "$CURL_LOG"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for url in $URLS; do
     url=$(echo "$url" | xargs)
     if curl --interface wg0 --fail --silent --show-error \
         --max-time "$TIMEOUT" "$url" > /dev/null 2> "$CURL_LOG"; then
+        IFS=$OLD_IFS
         exit 0
     fi
     printf '%s\n' "--- [health] Probe failed: $url ---" >> "$PROBE_LOG"
     sed 's/^/--- [health] /' "$CURL_LOG" >> "$PROBE_LOG"
 done
+IFS=$OLD_IFS
 
 cat "$PROBE_LOG" >&2
 if command -v awg > /dev/null 2>&1; then

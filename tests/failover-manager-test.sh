@@ -53,9 +53,21 @@ wait_for_file() {
     done
 }
 
+add_full_route_to_test_configs() {
+    config_dir="$1/configs"
+    for config in "$config_dir"/*.conf; do
+        [ -f "$config" ] || continue
+        if ! grep -q '^[[:space:]]*AllowedIPs[[:space:]]*=' "$config"; then
+            sed '/^\[Interface\]/a AllowedIPs = 0.0.0.0/0' "$config" > "$config.tmp"
+            mv "$config.tmp" "$config"
+        fi
+    done
+}
+
 make_success_commands() {
     command_dir="$1"
     mkdir -p "$command_dir"
+    add_full_route_to_test_configs "$(dirname "$command_dir")"
 
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$command_dir/awg-quick"
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$command_dir/check-tunnel"
@@ -128,7 +140,7 @@ test_empty_config_directory_waits_for_config() {
         || fail "health check should not run without a selected config"
     assert_no_configs "$root/bad"
 
-    printf '%s\n' '[Interface]' 'PrivateKey = test' > "$root/configs/working.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = test' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/working.conf"
     wait_for_file "$root/active"
 
     assert_file_exists "$root/active"
@@ -175,7 +187,7 @@ test_copy_failure_does_not_quarantine_config() {
 test_transient_initial_health_failure_is_retried() {
     root="$TMP_ROOT/transient-health"
     mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
-    printf '%s\n' '[Interface]' 'PrivateKey = test' > "$root/configs/working.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = test' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/working.conf"
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/awg-quick"
     printf '%s\n' \
         '#!/bin/sh' \
@@ -219,9 +231,9 @@ test_transient_initial_health_failure_is_retried() {
 test_fastest_config_is_selected() {
     root="$TMP_ROOT/speed-test"
     mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
-    printf '%s\n' '[Interface]' 'PrivateKey = slow' 'Address = 10.0.0.1/32' \
+    printf '%s\n' '[Interface]' 'PrivateKey = slow' 'Address = 10.0.0.1/32' 'AllowedIPs = 0.0.0.0/0' \
         > "$root/configs/slow.conf"
-    printf '%s\n' '[Interface]' 'PrivateKey = fast' 'Address = 10.0.0.2/32' \
+    printf '%s\n' '[Interface]' 'PrivateKey = fast' 'Address = 10.0.0.2/32' 'AllowedIPs = 0.0.0.0/0' \
         > "$root/configs/fast.conf"
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/awg-quick"
     printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/check-tunnel"
@@ -260,6 +272,146 @@ test_fastest_config_is_selected() {
     echo "PASS: fastest config is selected"
 }
 
+test_failed_latency_probe_sorts_after_measured_candidates() {
+    root="$TMP_ROOT/latency-probe-failure"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = failed' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/a-failed.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = good' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/z-good.conf"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/awg-quick"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/check-tunnel"
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'if grep -q "PrivateKey = failed" "$WG_CONF"; then echo "0.001 0.002"; exit 22; fi' \
+        'echo "0.001 0.050"' > "$root/bin/curl"
+    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel" "$root/bin/curl"
+
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    PENDING_FAILURE_FILE="$root/pending" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    SPEED_TEST=1 \
+    FAST_START=0 \
+    RANK_BUDGET=300 \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+
+    wait_for_file "$root/active"
+    grep -q 'z-good.conf' "$root/active" \
+        || fail "a failed latency request must not outrank a measured candidate"
+    grep -q 'a-failed.conf = ? ms' "$root/manager.log" \
+        || fail "failed latency should be reported as unknown"
+    stop_manager
+    echo "PASS: failed latency probe sorts after measured candidates"
+}
+
+test_split_tunnel_candidates_are_retained_and_skipped() {
+    root="$TMP_ROOT/split-tunnel"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = split' '[Peer]' 'AllowedIPs = 10.0.0.0/8' > "$root/configs/a-split.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = missing' > "$root/configs/b-missing.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = full' '[Peer]' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/z-full.conf"
+    make_success_commands "$root/bin"
+    sed -i '/AllowedIPs/d' "$root/configs/b-missing.conf"
+
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    PENDING_FAILURE_FILE="$root/pending" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    SPEED_TEST=1 \
+    FAST_START=0 \
+    RANK_BUDGET=300 \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+
+    wait_for_file "$root/active"
+    grep -q 'z-full.conf' "$root/active" || fail "expected the full-tunnel candidate to activate"
+    assert_file_exists "$root/configs/a-split.conf"
+    assert_file_exists "$root/configs/b-missing.conf"
+    assert_no_configs "$root/bad"
+    grep -q 'has no 0.0.0.0/0' "$root/manager.log" \
+        || fail "expected split-tunnel rejection to be visible"
+    stop_manager
+    echo "PASS: split-tunnel candidates are retained and skipped"
+}
+
+test_awg_up_timeout_keeps_config_and_does_not_mark_active() {
+    root="$TMP_ROOT/awg-up-timeout"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    printf '%s\n' '[Interface]' 'PrivateKey = slow' '[Peer]' 'AllowedIPs = 0.0.0.0/0' > "$root/configs/slow.conf"
+    printf '%s\n' '#!/bin/sh' '[ "$1" = up ] && exec sleep 3' 'exit 0' > "$root/bin/awg-quick"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$root/bin/check-tunnel"
+    chmod +x "$root/bin/awg-quick" "$root/bin/check-tunnel"
+
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    PENDING_FAILURE_FILE="$root/pending" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    SPEED_TEST=1 \
+    FAST_START=0 \
+    AWG_UP_TIMEOUT=1 \
+    CONFIG_POLL_INTERVAL=0.1 \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+
+    wait_for_log "$root/manager.log" "No config became healthy"
+    assert_file_exists "$root/configs/slow.conf"
+    assert_no_configs "$root/bad"
+    [ ! -f "$root/active" ] || fail "timed-out tunnel must not become active"
+    grep -q 'awg-quick diagnostic output follows' "$root/manager.log" \
+        || fail "timeout failure should be reported"
+    stop_manager
+    echo "PASS: awg-quick startup is bounded without quarantining the config"
+}
+
+test_config_paths_with_spaces_and_backslashes_survive_ranking() {
+    root="$TMP_ROOT/special-config-paths"
+    mkdir -p "$root/configs" "$root/bad" "$root/wg" "$root/bin"
+    config="$root/configs/server with\\backslash.conf"
+    printf '%s\n' '[Interface]' 'PrivateKey = path' > "$config"
+    make_success_commands "$root/bin"
+
+    PATH="$root/bin:$PATH" \
+    CONFIG_DIR="$root/configs" \
+    BAD_DIR="$root/bad" \
+    ACTIVE_MARKER="$root/active" \
+    FAILURE_FILE="$root/failures" \
+    PENDING_FAILURE_FILE="$root/pending" \
+    WG_CONF="$root/wg/wg0.conf" \
+    CHECK_TUNNEL="$root/bin/check-tunnel" \
+    TUN_SETUP="$TUN_SETUP" \
+    TUN_DEVICE=/dev/null \
+    SPEED_TEST=1 \
+    FAST_START=0 \
+        sh "$MANAGER" > "$root/manager.log" 2>&1 &
+    MANAGER_PID=$!
+
+    wait_for_file "$root/active"
+    actual=$(cat "$root/active")
+    [ "$actual" = "$config" ] \
+        || fail "spaces and backslashes in a config path must round-trip unchanged: expected [$config], got [$actual]"
+    assert_file_exists "$config"
+    stop_manager
+    echo "PASS: config paths with spaces and backslashes survive ranking"
+}
+
 test_tun_device_is_created() {
     root="$TMP_ROOT/tun-device"
     mkdir -p "$root/bin"
@@ -287,6 +439,7 @@ wait_for_log() {
 make_restart_commands() {
     root="$1"
     mkdir -p "$root/bin"
+    add_full_route_to_test_configs "$root"
     printf '%s\n' \
         '#!/bin/sh' \
         '[ "$1" = up ] || exit 0' \
@@ -315,7 +468,7 @@ run_restart_manager() {
     QUARANTINE_AFTER="${QUARANTINE_AFTER:-1}" \
     RANK_BUDGET="${RANK_BUDGET:-300}" \
     FAILOVER_FAILURES="${FAILOVER_FAILURES:-2}" \
-    FAILOVER_INTERVAL=0.1 \
+    FAILOVER_INTERVAL="${TEST_FAILOVER_INTERVAL:-0.1}" \
     CONFIG_POLL_INTERVAL=0.2 \
     TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-1}" \
         sh "$MANAGER" > "$root/manager.log" 2>&1 &
@@ -346,6 +499,7 @@ test_dead_tunnel_is_restarted_not_quarantined() {
 
     grep -q "Tunnel recovered after restart" "$root/manager.log" \
         || fail "expected the tunnel to be restarted and recover"
+    assert_file_exists "$root/active"
     assert_file_exists "$root/configs/a.conf"
     assert_no_configs "$root/bad"
     [ "$(cat "$root/up-count")" -ge 2 ] || fail "expected awg-quick up to run again"
@@ -501,14 +655,14 @@ test_fast_start_uses_last_working_config() {
     run_restart_manager "$root"
     wait_for_file "$root/active"
     wait_for_log "$root/manager.log" "ACTIVE"
-    stop_manager
-    unset SPEED_TEST
-
     grep -q "c.conf" "$root/active" || fail "expected the last working config c.conf to be active"
     grep -q "Fast start" "$root/manager.log" || fail "expected a fast start"
     if grep -q "Speed test: [a-z]*\.conf" "$root/manager.log"; then
         fail "fast start must not rank the other configs"
     fi
+    stop_manager
+    [ ! -f "$root/active" ] || fail "termination must remove the active marker"
+    unset SPEED_TEST
     echo "PASS: fast start uses the last working config"
 }
 
@@ -528,9 +682,6 @@ test_fast_start_falls_back_to_ranking() {
     run_restart_manager "$root"
     wait_for_file "$root/active"
     wait_for_log "$root/manager.log" "ACTIVE"
-    stop_manager
-    unset SPEED_TEST QUARANTINE_AFTER FAILOVER_FAILURES
-
     grep -q "Fast start" "$root/manager.log" || fail "expected a fast start attempt"
     grep -q "Ranking configs" "$root/manager.log" || fail "expected the ranking after the failed fast start"
     if grep -q "c.conf" "$root/active"; then
@@ -539,6 +690,9 @@ test_fast_start_falls_back_to_ranking() {
     assert_file_exists "$root/configs/c.conf"
     [ "$(cat "$root/bad/.last_active")" = "$(basename "$(cat "$root/active")")" ] \
         || fail "expected the new active config to be remembered"
+    stop_manager
+    [ ! -f "$root/active" ] || fail "termination must remove the active marker"
+    unset SPEED_TEST QUARANTINE_AFTER FAILOVER_FAILURES
     echo "PASS: fast start falls back to ranking"
 }
 
@@ -713,6 +867,10 @@ test_empty_config_directory_waits_for_config
 test_copy_failure_does_not_quarantine_config
 test_transient_initial_health_failure_is_retried
 test_fastest_config_is_selected
+test_failed_latency_probe_sorts_after_measured_candidates
+test_split_tunnel_candidates_are_retained_and_skipped
+test_awg_up_timeout_keeps_config_and_does_not_mark_active
+test_config_paths_with_spaces_and_backslashes_survive_ranking
 test_dead_tunnel_is_restarted_not_quarantined
 test_startup_probes_wait_longer_than_monitoring
 test_only_config_is_never_quarantined

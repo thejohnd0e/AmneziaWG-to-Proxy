@@ -22,6 +22,7 @@ FAIL_THRESHOLD="${FAILOVER_FAILURES:-3}"
 CONFIG_POLL_INTERVAL="${CONFIG_POLL_INTERVAL:-30}"
 HEALTH_TIMEOUT="${FAILOVER_TIMEOUT:-8}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-8}"
+AWG_UP_TIMEOUT="${AWG_UP_TIMEOUT:-30}"
 TUNNEL_RESTARTS="${TUNNEL_RESTARTS:-2}"
 QUARANTINE_AFTER="${QUARANTINE_AFTER:-3}"
 RANK_BUDGET="${RANK_BUDGET:-0}"
@@ -41,9 +42,20 @@ log() {
 }
 
 get_configs() {
-    ls "$CONFIG_DIR"/*.conf 2>/dev/null \
-        | grep -v "/wg0.conf$" \
-        | sort -V
+    tab=$(printf '\t')
+    newline='
+'
+    for config in "$CONFIG_DIR"/*.conf; do
+        [ -f "$config" ] || continue
+        [ "$(basename "$config")" != wg0.conf ] || continue
+        case "$config" in
+            *"$tab"*|*"$newline"*)
+                log "ERROR: Config filename contains a tab or newline; skipping"
+                continue
+                ;;
+        esac
+        printf '%s\n' "$config"
+    done | sort -V
 }
 
 # --- Move failed config to bad_config ---
@@ -117,12 +129,33 @@ discard_pending_failures() {
 
 # --- Bring up tunnel with a config ---
 
+has_full_tunnel_route() {
+    awk '
+        {
+            line = $0
+            sub(/[[:space:]]*#.*/, "", line)
+            if (line !~ /^[[:space:]]*AllowedIPs[[:space:]]*=/) next
+            sub(/^[^=]*=/, "", line)
+            count = split(line, fields, ",")
+            for (i = 1; i <= count; i++) {
+                gsub(/[[:space:]]/, "", fields[i])
+                if (fields[i] == "0.0.0.0/0") found = 1
+            }
+        }
+        END { exit found ? 0 : 1 }
+    ' "$1"
+}
+
 # The kill switch stays armed whether or not wg0 exists: only the tunnel, LAN and
 # the tunnel's own socket may leave. DNS is opened for the bring-up window only,
 # because awg-quick may need to resolve an Endpoint host name.
 start_tunnel() {
     local config_file="$1"
     local up_status=0
+    if ! has_full_tunnel_route "$config_file"; then
+        log "ERROR: $(basename "$config_file") has no 0.0.0.0/0 in AllowedIPs (split tunnel is not supported)"
+        return 3
+    fi
     if ! cp "$config_file" "$WG_CONF"; then
         log "ERROR: Could not stage $(basename "$config_file") at $WG_CONF"
         return 2
@@ -137,7 +170,12 @@ start_tunnel() {
         log "ERROR: Kill switch could not be armed, not starting the tunnel"
         return 2
     fi
-    awg-quick up wg0 > "$AWG_LOG" 2>&1 || up_status=1
+    if ! command -v timeout > /dev/null 2>&1; then
+        log "ERROR: timeout command is required to bound awg-quick up"
+        "$KILLSWITCH" apply || log "ERROR: Kill switch could not be re-applied"
+        return 2
+    fi
+    timeout "$AWG_UP_TIMEOUT" awg-quick up wg0 > "$AWG_LOG" 2>&1 || up_status=1
     if ! "$KILLSWITCH" apply; then
         log "ERROR: Kill switch could not be finalized, taking the tunnel down"
         awg-quick down wg0 > /dev/null 2>&1
@@ -180,10 +218,15 @@ health_check_with_retries() {
 # Returns 0 if the tunnel is healthy afterwards.
 restart_tunnel() {
     local config="$1"
+    rm -f "$ACTIVE_MARKER"
     awg-quick down wg0 > /dev/null 2>&1
     sleep 2
     start_tunnel "$config" || return 1
-    health_check_with_retries "$config"
+    if health_check_with_retries "$config"; then
+        printf '%s\n' "$config" > "$ACTIVE_MARKER"
+        return 0
+    fi
+    return 1
 }
 
 # Best round-trip time in milliseconds through wg0 (empty on failure).
@@ -196,10 +239,13 @@ measure_latency() {
     local i=1
     local t val
     while [ "$i" -le 3 ]; do
-        t=$(curl --interface wg0 --silent --max-time "$HEALTH_TIMEOUT" \
-            -o /dev/null -w '%{time_namelookup} %{time_total}' "$url" 2>/dev/null)
-        val=$(printf '%s\n' "$t" \
-            | awk 'NF == 2 { d = $2 - $1; if (d < 0) d = 0; printf "%.6f", d }')
+        if t=$(curl --interface wg0 --silent --max-time "$HEALTH_TIMEOUT" \
+            -o /dev/null -w '%{time_namelookup} %{time_total}' "$url" 2>/dev/null); then
+            val=$(printf '%s\n' "$t" \
+                | awk 'NF == 2 { d = $2 - $1; if (d < 0) d = 0; printf "%.6f", d }')
+        else
+            val=""
+        fi
         case "$val" in
             ''|*[!0-9.]*) : ;;
             *) samples="${samples}${val}\n" ;;
@@ -211,8 +257,7 @@ measure_latency() {
 }
 
 # Speed-test configs. Prints "latency<TAB>config" lines sorted best-first.
-# Configs that cannot start are quarantined; configs that fail a health check get
-# a strike. After RANK_BUDGET seconds the ranking stops once at least one config
+# Failed candidates are kept pending until a replacement is active. After RANK_BUDGET seconds the ranking stops once at least one config
 # works (0 = the first working config wins), so a long list of dead configs cannot
 # delay the proxy; configs that were not tested yet stay in $CONFIG_DIR. Each config
 # gets STARTUP_CHECKS health checks here, not the full failure threshold.
@@ -239,6 +284,9 @@ rank_configs() {
             log "Fatal staging error; leaving $(basename "$config") in $CONFIG_DIR"
             return 2
         fi
+        if [ "$status" -eq 3 ]; then
+            continue
+        fi
         if [ "$status" -ne 0 ]; then
             log "awg-quick failed for $(basename "$config")"
             awg-quick down wg0 > /dev/null 2>&1
@@ -256,7 +304,8 @@ rank_configs() {
         ms=$(measure_latency)
         log "Speed test: $(basename "$config") = ${ms:-?} ms"
         ms=${ms:-999999}
-        results="${results}${ms}\t${config}\n"
+        results="${results}${ms}	${config}
+"
 
         awg-quick down wg0 > /dev/null 2>&1
     done <<EOF
@@ -269,7 +318,7 @@ EOF
         log "No config became healthy; preserving configs and strike counts"
     fi
 
-    printf '%b' "$results" | sort -n
+    printf '%s' "$results" | sort -n
 }
 
 # --- Main ---
@@ -291,6 +340,7 @@ fi
 
 echo "0" > "$FAILURE_FILE"
 discard_pending_failures
+trap 'rm -f "$ACTIVE_MARKER"; awg-quick down wg0 > /dev/null 2>&1; exit 0' INT TERM
 
 log "Failover manager started"
 log "Config dir: $CONFIG_DIR | Bad dir: $BAD_DIR"
@@ -343,15 +393,22 @@ while true; do
         log "Trying config: $(basename "$CURRENT_CONFIG")"
         start_tunnel "$CURRENT_CONFIG"
         START_STATUS=$?
-            if [ "$START_STATUS" -eq 2 ]; then
+        if [ "$START_STATUS" -eq 2 ]; then
             log "Fatal staging error; leaving $(basename "$CURRENT_CONFIG") in $CONFIG_DIR"
             exit 1
+        fi
+        if [ "$START_STATUS" -eq 3 ]; then
+            log "Skipping unsupported config $(basename "$CURRENT_CONFIG")"
+            CURRENT_CONFIG=""
+            [ -n "$RANKED" ] || sleep "$CONFIG_POLL_INTERVAL"
+            continue
         fi
         if [ "$START_STATUS" -ne 0 ]; then
             log "awg-quick failed for $(basename "$CURRENT_CONFIG")"
             awg-quick down wg0 > /dev/null 2>&1
             record_pending_failure "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
+            [ -n "$RANKED" ] || sleep "$CONFIG_POLL_INTERVAL"
             continue
         fi
 
@@ -359,6 +416,7 @@ while true; do
             awg-quick down wg0 > /dev/null 2>&1
             record_pending_failure "$CURRENT_CONFIG"
             CURRENT_CONFIG=""
+            [ -n "$RANKED" ] || sleep "$CONFIG_POLL_INTERVAL"
             continue
         fi
 
@@ -366,7 +424,7 @@ while true; do
         SKIP_CONFIG=""
         STABLE_COUNT=0
         log "Config $(basename "$CURRENT_CONFIG") is ACTIVE"
-        echo "$CURRENT_CONFIG" > "$ACTIVE_MARKER"
+        printf '%s\n' "$CURRENT_CONFIG" > "$ACTIVE_MARKER"
         basename "$CURRENT_CONFIG" > "$LAST_ACTIVE_FILE" 2>/dev/null || true
         echo "0" > "$FAILURE_FILE"
     fi
@@ -377,6 +435,9 @@ while true; do
     "$CHECK_TUNNEL"
     if [ $? -eq 0 ]; then
         echo "0" > "$FAILURE_FILE"
+        if [ ! -f "$ACTIVE_MARKER" ]; then
+            printf '%s\n' "$CURRENT_CONFIG" > "$ACTIVE_MARKER"
+        fi
         STABLE_COUNT=$((STABLE_COUNT + 1))
         if [ "$STABLE_COUNT" -ge "$FAIL_THRESHOLD" ]; then
             clear_strikes "$CURRENT_CONFIG"
@@ -425,11 +486,11 @@ while true; do
 
     # Otherwise switch config
     log "Switching config..."
+    rm -f "$ACTIVE_MARKER"
     awg-quick down wg0 > /dev/null 2>&1
     record_pending_failure "$CURRENT_CONFIG"
     SKIP_CONFIG="$CURRENT_CONFIG"
     CURRENT_CONFIG=""
-    rm -f "$ACTIVE_MARKER"
     echo "0" > "$FAILURE_FILE"
 
     # Small pause before trying next config
