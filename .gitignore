@@ -2,3 +2,4 @@
 config/*.conf
 bad_config/*.conf
 PLAN.md
+AGENTS.md
