@@ -83,6 +83,14 @@ destination the proxy genuinely needs. Such destinations bypass the VPN. The
 TCP connections on the SOCKS/HTTP listener ports are allowed, but they do not
 authorize new proxy requests to the client network.
 
+Bypass and return routes are installed before the first tunnel start. Every
+non-empty list needs the Docker gateway of its own address family: Docker's
+default bridge provides only an IPv4 gateway, so a non-empty `LAN_NETWORK6` or
+`PROXY_CLIENT_NETWORKS6` makes the container log
+`requested IPv6 routes but no Docker gateway is available` and refuse to start.
+Leave the IPv6 lists empty unless the Docker network itself has IPv6 enabled.
+Empty lists are ignored even when they contain only separators.
+
 ## Upstream Settings
 
 | Variable | Default | Description |

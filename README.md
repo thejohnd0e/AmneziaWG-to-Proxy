@@ -61,6 +61,11 @@ Proxies are available at:
 - **SOCKS5:** `localhost:8200`
 - **HTTP:** `localhost:9200`
 
+Both listen on loopback by default. To serve LAN devices, set
+`PROXY_BIND_ADDRESS` to a trusted interface and add only the exact destination
+CIDRs you need to `LAN_NETWORK`; see [Security](docs/SECURITY.md) and
+[Configuration](docs/CONFIGURATION.md).
+
 ## How It Works
 
 The service uses Docker's standard `bridge` network and numeric DNS servers

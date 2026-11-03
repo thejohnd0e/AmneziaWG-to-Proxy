@@ -15,6 +15,7 @@ docker compose logs amnezia-proxy
 - No `.conf` files in `config/` — the container waits but reports unhealthy
 - Invalid `.conf` syntax — the `awg-quick` command fails
 - Missing `NET_ADMIN` capability — Docker rejects the startup
+- `requested IPv6 routes but no Docker gateway is available` — `LAN_NETWORK6` or `PROXY_CLIENT_NETWORKS6` is set while the Docker network has no IPv6; empty those lists or enable IPv6 on the Docker network
 
 ## Tunnel fails to start
 
