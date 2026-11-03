@@ -96,7 +96,10 @@ test_missing_wg_directory_is_created() {
 
     wait_for_file "$root/active"
 
-    assert_file_exists "$root/active"
+    if [ ! -f "$root/active" ]; then
+        cat "$root/manager.log" >&2 2>/dev/null || true
+        fail "manager did not write the active marker: $root/active"
+    fi
     assert_file_exists "$root/missing/amneziawg/wg0.conf"
     assert_file_exists "$root/configs/working.conf"
     assert_no_configs "$root/bad"

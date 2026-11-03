@@ -1,5 +1,6 @@
 # AmneziaWG-to-Proxy
 
+[![CI](https://github.com/thejohnd0e/AmneziaWG-to-Proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/thejohnd0e/AmneziaWG-to-Proxy/actions/workflows/ci.yml)
 [![MIT License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Docker Compose](https://img.shields.io/badge/Docker%20Compose-v2-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![Shell](https://img.shields.io/badge/Shell-POSIX%20sh-4EAA25?logo=gnu-bash&logoColor=white)](scripts/)
