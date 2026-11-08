@@ -147,12 +147,13 @@ move_to_bad() {
     return 1
 }
 
+# Milliseconds from a monotonic clock: BusyBox date has no %N, /proc/uptime has 10 ms steps.
 now_ms() {
-    ns=$(date +%s%N 2>/dev/null)
-    case "$ns" in
-        *[!0-9]*|'') echo "$(($(date +%s) * 1000))" ;;
-        *) echo "$((ns / 1000000))" ;;
-    esac
+    if [ -r /proc/uptime ]; then
+        awk '{ printf "%d\n", $1 * 1000 }' /proc/uptime
+    else
+        echo "$(($(date +%s) * 1000))"
+    fi
 }
 
 # Median of 3 latency probes in ms; empty when no probe succeeded.
@@ -339,7 +340,7 @@ if [ -n "$MOVED" ]; then
         printf '  %s%s%s\n' "$C_RED" "$name" "$C_RESET"
     done
     echo ""
-    printf '%sTip: restore a config by moving it back to %s%s\n' "$C_DIM" "$CONFIG_DIR" "$C_RESET"
+    printf '%sTip: restore a config by moving it back to %s%s\n' "$C_DIM" "${CHECKER_HOST_CONFIG_DIR:-$CONFIG_DIR}" "$C_RESET"
 fi
 
 [ "$FAILED" -eq 0 ] || exit 1

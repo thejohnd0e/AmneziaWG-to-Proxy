@@ -127,6 +127,7 @@ docker run --rm ${DOCKER_TTY[@]+"${DOCKER_TTY[@]}"} \
     -e FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-8}" \
     -e AWG_UP_TIMEOUT="${AWG_UP_TIMEOUT:-30}" \
     -e SPEED_TEST_URL="${SPEED_TEST_URL:-}" \
+    -e CHECKER_HOST_CONFIG_DIR="$CONFIG_DIR" \
     -e CHECKER_COLOR="${CHECKER_COLOR:-auto}" \
     -e NO_COLOR="${NO_COLOR:-}" \
     --entrypoint /scripts/proxy-checker.sh \

@@ -72,6 +72,7 @@ printf '%s\n' "$moved" | grep -q 'broken.conf' || fail "moved list misses broken
 if printf '%s\n' "$moved" | grep -q 'old.conf'; then
     fail "moved list must only name configs moved in this run"
 fi
+grep -Eq 'awg-quick failed, [0-9]+ms' "$TMP_ROOT/out" || fail "tunnel time missing from a failed row"
 
 # A failed copy must leave the source in place.
 mkdir -p "$TMP_ROOT/c2"
