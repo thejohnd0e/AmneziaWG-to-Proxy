@@ -65,7 +65,7 @@ Tip: restore a config by moving it back to ./config
 
 | Code | Meaning |
 |---|---|
-| `0` | All configs are working |
+| `0` | All checked configs are working (skipped split-tunnel configs do not fail the run) |
 | `1` | One or more configs were rejected and moved |
 | `2` | Checker error (missing directory, Docker issue, etc.) |
 
@@ -73,21 +73,25 @@ Tip: restore a config by moving it back to ./config
 
 For each config file:
 
-1. **Tunnel startup** — `awg-quick up wg0`
-2. **Connectivity** — HTTPS through the tunnel (dual endpoints)
-3. **Public IP** — via GeoIP API through the active `wg0` interface
-4. **GeoIP info** — country, city, ASN, provider
-5. **Latency** — 3 probes, median value
+1. **Full tunnel** — `AllowedIPs` must contain `0.0.0.0/0`, as in the failover
+   manager; split-tunnel configs are reported as `SKIP` and left in place
+2. **Tunnel startup** — `awg-quick up wg0`, bounded by `AWG_UP_TIMEOUT`
+3. **Connectivity** — the same `check-tunnel.sh` as the service: any `HEALTH_URLS`
+   entry must answer `2xx` through `wg0`
+4. **Public IP and GeoIP** — country, city, ASN, provider (HTTPS providers, through `wg0`)
+5. **Latency** — 3 probes of `SPEED_TEST_URL` (default: first `HEALTH_URLS` entry), median of the successful ones
 
-A config passes only if all steps succeed.
+Steps 2 and 3 decide the verdict; GeoIP and latency are informational.
 
 ## Non-working Configs
 
 Failed configs are always moved to `bad_config/`:
 
-1. File is copied to `bad_config/`
-2. Original is deleted from the source directory
-3. If name exists in `bad_config/`, timestamp is appended
+1. File is copied to `bad_config/`; if the name exists there, a timestamp is appended
+   instead of overwriting the older file
+2. Original is deleted only after the copy succeeded
+
+The summary lists only the configs moved by this run.
 
 This is non-reversible by the checker.
 To restore, move the file back manually.
@@ -112,12 +116,17 @@ To restore, move the file back manually.
 
 ## Environment Variables
 
-The checker respects these from `.env` or the host environment:
+The wrapper reads these from the host environment first, then from the
+project's `.env` (`CHECKER_ENV_FILE` points to another file), so the checker
+probes the same way as the running service:
 
 | Variable | Effect |
 |---|---|
 | `HEALTH_URLS` | Endpoints for health check |
 | `FAILOVER_TIMEOUT` | HTTPS probe timeout |
+| `AWG_UP_TIMEOUT` | Max seconds for `awg-quick up` |
+| `SPEED_TEST_URL` | Latency probe URL |
+| `DNS_PRIMARY`, `DNS_SECONDARY` | Resolvers of the checker container |
 | `CHECKER_COLOR` | `auto` (default), `always`, or `never` |
 | `NO_COLOR` | Any non-empty value disables color |
 

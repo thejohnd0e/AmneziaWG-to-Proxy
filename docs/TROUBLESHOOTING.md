@@ -60,7 +60,7 @@ docker compose logs amnezia-proxy | grep -i proxy
 
 **Possible causes:**
 - Tunnel is not yet established (first startup takes time)
-- Privoxy failed to start (check `HTTPPORT` setting)
+- A proxy process crashed (the entrypoint restarts it within seconds; look for `proxy exited; restarting it` in the logs)
 - Port conflict on the host
 
 ## Docker permission errors

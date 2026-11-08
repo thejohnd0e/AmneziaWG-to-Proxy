@@ -39,12 +39,13 @@ The script never registers from the real address: it needs a proxy or an active 
 | `AWG_UP_TIMEOUT` | `30` | Max seconds for `awg-quick up`; endpoint hostnames are resolved separately with a fixed 10-second bound before AWG starts |
 | `SPEED_TEST` | `1` | Rank configs at startup; with default `RANK_BUDGET=0`, the first working config wins, not necessarily the globally fastest |
 | `SPEED_TEST_URL` | *(first `HEALTH_URLS` entry)* | URL used for latency probes |
+| `CONFIG_POLL_INTERVAL` | `30` | Seconds between scans of `config/` while no config works |
 
 ## Health Check
 
 | Variable | Default | Description |
 |---|---|---|
-| `HEALTH_URLS` | `https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204` | Comma-separated HTTPS URLs for tunnel health check |
+| `HEALTH_URLS` | `https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204` | Comma-separated HTTPS URLs for tunnel health check; a probe counts only with a `2xx` answer (redirects and error pages fail) |
 | `HEALTH_URL_CHECK` | *(empty)* | Override for upstream healthcheck ping target |
 
 ## DNS
@@ -66,7 +67,11 @@ network so Docker does not replace numeric resolvers with the UID-blind
 | Variable | Default | Description |
 |---|---|---|
 | `PROXY_BIND_ADDRESS` | `127.0.0.1` | Host bind address for proxy ports; use a trusted interface explicitly for LAN access |
-| `HTTPPORT` | `8080` | Internal HTTP proxy port (Privoxy) |
+
+The internal ports are fixed (SOCKS5 `1080`, HTTP `8080`): Compose publishes
+them as host ports `8200` and `9200`, and the kill switch only lets proxy
+replies leave from these two ports. The former `HTTPPORT` setting is ignored
+with a warning.
 
 ## Network Settings
 
@@ -95,7 +100,7 @@ Empty lists are ignored even when they contain only separators.
 
 | Variable | Default | Description |
 |---|---|---|
-| `ENABLE_RANDOM` | `0` | Must be `0` — random selection is incompatible with failover |
+| `ENABLE_RANDOM` | `0` | Fixed to `0` in `docker-compose.yml` — random selection is incompatible with failover; not read from `.env` |
 
 ## Example `.env`
 
