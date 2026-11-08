@@ -46,7 +46,7 @@ The script never registers from the real address: it needs a proxy or an active 
 | Variable | Default | Description |
 |---|---|---|
 | `HEALTH_URLS` | `https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204` | Comma-separated HTTPS URLs for tunnel health check; a probe counts only with a `2xx` answer (redirects and error pages fail) |
-| `HEALTH_URL_CHECK` | *(empty)* | Override for upstream healthcheck ping target |
+| `HEALTH_URL_CHECK` | — | Removed: it only steered the upstream ping healthcheck, which `/healthcheck.sh` replaces |
 
 ## DNS
 
