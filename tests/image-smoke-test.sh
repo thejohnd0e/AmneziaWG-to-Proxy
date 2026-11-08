@@ -16,7 +16,8 @@ docker run --rm --entrypoint /bin/sh "$IMAGE" -ec '
         /check-tunnel.sh \
         /ensure-tun.sh \
         /proxy-routes.sh \
-        /resolve-endpoint.sh; do
+        /resolve-endpoint.sh \
+        /healthcheck.sh; do
         test -x "$path" || { echo "FAIL: missing executable $path" >&2; exit 1; }
     done
 
@@ -27,7 +28,8 @@ docker run --rm --entrypoint /bin/sh "$IMAGE" -ec '
         /check-tunnel.sh:/scripts/check-tunnel.sh \
         /ensure-tun.sh:/scripts/ensure-tun.sh \
         /proxy-routes.sh:/scripts/proxy-routes.sh \
-        /resolve-endpoint.sh:/scripts/resolve-endpoint.sh; do
+        /resolve-endpoint.sh:/scripts/resolve-endpoint.sh \
+        /healthcheck.sh:/scripts/healthcheck.sh; do
         link=${path%%:*}
         target=${path#*:}
         test "$(readlink "$link")" = "$target" \
@@ -38,6 +40,15 @@ docker run --rm --entrypoint /bin/sh "$IMAGE" -ec '
         command -v "$utility" > /dev/null 2>&1 \
             || { echo "FAIL: required utility is missing: $utility" >&2; exit 1; }
     done
+    cr=$(printf "\r")
+    for file in /scripts/*.sh; do
+        if grep -q "$cr" "$file"; then
+            echo "FAIL: CRLF line endings in $file" >&2
+            exit 1
+        fi
+    done
+    privoxy --help 2>&1 | grep -q -- --no-daemon \
+        || { echo "FAIL: privoxy does not support --no-daemon" >&2; exit 1; }
     test -x /microsocks || { echo "FAIL: /microsocks is missing" >&2; exit 1; }
     test "$(id -u endpoint-resolver)" = 65532 \
         || { echo "FAIL: endpoint-resolver does not have UID 65532" >&2; exit 1; }

@@ -19,12 +19,16 @@ trap 'exit 143' TERM
 
 for url in $URLS; do
     url=$(echo "$url" | xargs)
-    if curl --interface wg0 --fail --silent --show-error \
-        --max-time "$TIMEOUT" "$url" > /dev/null 2> "$CURL_LOG"; then
-        IFS=$OLD_IFS
-        exit 0
-    fi
-    printf '%s\n' "--- [health] Probe failed: $url ---" >> "$PROBE_LOG"
+    # Only a 2xx answer counts: a redirect or an error page is not connectivity.
+    code=$(curl --interface wg0 --silent --show-error --output /dev/null \
+        --max-time "$TIMEOUT" --write-out '%{http_code}' "$url" 2> "$CURL_LOG")
+    case "$code" in
+        2??)
+            IFS=$OLD_IFS
+            exit 0
+            ;;
+    esac
+    printf '%s\n' "--- [health] Probe failed: $url (HTTP ${code:-none}) ---" >> "$PROBE_LOG"
     sed 's/^/--- [health] /' "$CURL_LOG" >> "$PROBE_LOG"
 done
 IFS=$OLD_IFS

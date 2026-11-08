@@ -22,6 +22,9 @@ jobs:
           sh tests/killswitch-mark-test.sh
           sh tests/check-tunnel-test.sh
           sh tests/proxy-routes-test.sh
+          sh tests/healthcheck-test.sh
+          sh tests/proxy-checker-test.sh
+          sh tests/entrypoint-test.sh
       - name: ShellCheck (POSIX sh)
         run: docker run --rm -v "$PWD:/mnt" -w /mnt koalaman/shellcheck:v0.10.0 -s sh --severity=error scripts/*.sh tests/*.sh
       - name: Hadolint

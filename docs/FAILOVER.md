@@ -77,12 +77,18 @@ Two independent endpoints are used:
 - `https://connectivitycheck.gstatic.com/generate_204`
 - `https://cp.cloudflare.com/generate_204`
 
-A round is successful if **any** endpoint responds.
-Both must fail for the round to count as a failure.
+A round is successful if **any** endpoint answers with a `2xx` status.
+A redirect or an error page does not count. All endpoints must fail for the
+round to count as a failure.
 
-The Docker healthcheck timeout is 20 seconds, leaving room for both default
-probes at eight seconds each. Increase it if `HEALTH_URLS` has more endpoints or
-the probe timeout is raised.
+The Docker healthcheck (`/healthcheck.sh`) checks what clients use: it needs an
+active config and a `2xx` answer through **both** the SOCKS5 proxy
+(`127.0.0.1:1080`) and the HTTP proxy (`127.0.0.1:8080`). Its timeout is 20
+seconds. Increase it if `HEALTH_URLS` has more endpoints or the probe timeout
+is raised.
+
+The entrypoint supervises both proxies and restarts one that exits; if the
+failover manager exits, the container exits with its status.
 
 This dual-endpoint approach prevents false positives when one service is temporarily unavailable.
 

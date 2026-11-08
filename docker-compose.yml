@@ -43,17 +43,24 @@ services:
       STARTUP_CHECKS: ${STARTUP_CHECKS:-1}
       FAST_START: ${FAST_START:-1}
       FAILOVER_TIMEOUT: ${FAILOVER_TIMEOUT:-8}
+      SPEED_TEST: ${SPEED_TEST:-1}
+      SPEED_TEST_URL: ${SPEED_TEST_URL:-}
+      CONFIG_POLL_INTERVAL: ${CONFIG_POLL_INTERVAL:-30}
       HEALTH_URLS: ${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}
-      HEALTH_URL_CHECK: ${HEALTH_URL_CHECK:-}
       LAN_NETWORK: ${LAN_NETWORK-}
       LAN_NETWORK6: ${LAN_NETWORK6-}
       PROXY_CLIENT_NETWORKS: ${PROXY_CLIENT_NETWORKS-}
       PROXY_CLIENT_NETWORKS6: ${PROXY_CLIENT_NETWORKS6-}
-      HTTPPORT: ${HTTPPORT:-8080}
       ENABLE_RANDOM: "0"
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/active_config && /check-tunnel.sh"]
+      # Probes the SOCKS5 and HTTP proxies themselves, not only wg0.
+      test: ["CMD", "/healthcheck.sh"]
       interval: 30s
       timeout: 20s
       retries: 3
       start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

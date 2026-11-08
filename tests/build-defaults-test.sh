@@ -35,4 +35,15 @@ fi
 grep -Fq 'ghcr.io/mainfrezzer/amnezia-bridge@sha256:fcfa9ae5f361e257e3451a37730c0886b7c1c2f9664b5dd7021c85201c90dc31' "$PROJECT_DIR/Dockerfile" \
     || { echo "FAIL: upstream image must use the verified OCI index digest" >&2; exit 1; }
 
+# Every documented .env setting must reach Compose, or it is silently ignored.
+for key in $(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$PROJECT_DIR/.env.example"); do
+    grep -Fq "\${$key:-" "$PROJECT_DIR/docker-compose.yml" \
+        || grep -Fq "\${$key-" "$PROJECT_DIR/docker-compose.yml" \
+        || { echo "FAIL: .env.example sets $key but docker-compose.yml never reads it" >&2; exit 1; }
+done
+if grep -Eq '^[[:space:]]+HTTPPORT:' "$PROJECT_DIR/docker-compose.yml"; then
+    echo "FAIL: HTTPPORT must stay fixed; ports and the kill switch assume 8080" >&2
+    exit 1
+fi
+
 echo "PASS: safe proxy defaults, isolated build context and direct numeric DNS"

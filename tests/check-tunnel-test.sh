@@ -12,7 +12,12 @@ cat > "$TMP_ROOT/bin/curl" <<'EOF'
 #!/bin/sh
 eval "url=\${$#}"
 printf '%s\n' "$url" >> "$PROBE_CALLS"
-[ "$url" = "$HEALTH_URL_OK" ]
+if [ "$url" = "$HEALTH_URL_OK" ]; then
+    printf '%s' "${HEALTH_CODE:-204}"
+    exit 0
+fi
+printf '000'
+exit 7
 EOF
 cat > "$TMP_ROOT/bin/awg" <<'EOF'
 #!/bin/sh
@@ -38,4 +43,15 @@ expected=$(printf '%s\n' 'https://first.example/health' 'https://second.example/
     || { echo "FAIL: comma-separated endpoint parsing changed" >&2; exit 1; }
 [ ! -e "$AWG_CALLS" ] || { echo "FAIL: diagnostics ran after a successful probe" >&2; exit 1; }
 
-echo "PASS: check-tunnel probes comma-separated endpoints and exits on success"
+export HEALTH_URLS='https://second.example/health'
+if HEALTH_CODE=302 FAILOVER_TIMEOUT=1 sh "$PROJECT_DIR/scripts/check-tunnel.sh" 2>/dev/null; then
+    echo "FAIL: a redirect must not count as a healthy tunnel" >&2
+    exit 1
+fi
+if HEALTH_CODE=503 FAILOVER_TIMEOUT=1 sh "$PROJECT_DIR/scripts/check-tunnel.sh" 2>/dev/null; then
+    echo "FAIL: an error status must not count as a healthy tunnel" >&2
+    exit 1
+fi
+HEALTH_CODE=200 FAILOVER_TIMEOUT=1 sh "$PROJECT_DIR/scripts/check-tunnel.sh"     || { echo "FAIL: a 200 answer must count as healthy" >&2; exit 1; }
+
+echo "PASS: check-tunnel probes comma-separated endpoints, needs a 2xx answer and exits on success"
