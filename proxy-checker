@@ -9,15 +9,24 @@
 #   ./proxy-checker ./config
 #   ./proxy-checker ./config --bad-dir ./bad_config
 #   ./proxy-checker /etc/amnezia/amneziawg
+#
+# Settings come from the environment first, then from the project's .env
+# (CHECKER_ENV_FILE overrides its location), so the checker probes the same
+# way as the running service.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IMAGE="${CHECKER_IMAGE:-amnezia-bridge-failover:local}"
 CONFIG_DIR="${1:-}"
 BAD_DIR=""
 
-if [ -z "$CONFIG_DIR" ]; then
+usage() {
     echo "Usage: $0 <config_dir> [--bad-dir <bad_config_dir>]"
+}
+
+if [ -z "$CONFIG_DIR" ]; then
+    usage
     echo ""
     echo "Examples:"
     echo "  $0 ./config"
@@ -28,13 +37,51 @@ fi
 # Parse optional arguments.
 if [ "${2:-}" = "--bad-dir" ]; then
     BAD_DIR="${3:-}"
+    if [ -z "$BAD_DIR" ]; then
+        echo "ERROR: --bad-dir needs a directory"
+        usage
+        exit 2
+    fi
 elif [ -n "${2:-}" ]; then
     echo "ERROR: Unknown argument: $2"
-    echo "Usage: $0 <config_dir> [--bad-dir <bad_config_dir>]"
+    usage
     exit 2
 fi
 
+# Read the settings the checker uses from a Compose-style .env file. Values are
+# taken literally (never evaluated); an unquoted " #" starts a comment.
+load_env_file() {
+    local file="$1" line key value
+    [ -f "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Z_][A-Z0-9_]*)=(.*)$ ]] || continue
+        key="${BASH_REMATCH[2]}"
+        value="${BASH_REMATCH[3]}"
+        case "$key" in
+            HEALTH_URLS|FAILOVER_TIMEOUT|AWG_UP_TIMEOUT|SPEED_TEST_URL|DNS_PRIMARY|DNS_SECONDARY) ;;
+            *) continue ;;
+        esac
+        [ -z "${!key:-}" ] || continue
+        if [[ "$value" =~ ^\"(.*)\"[[:space:]]*(#.*)?$ ]] || [[ "$value" =~ ^\'(.*)\'[[:space:]]*(#.*)?$ ]]; then
+            value="${BASH_REMATCH[1]}"
+        else
+            value="${value%%[[:space:]]#*}"
+            value="${value%"${value##*[![:space:]]}"}"
+        fi
+        [ -n "$value" ] || continue
+        printf -v "$key" '%s' "$value"
+        export "${key?}"
+    done < "$file"
+}
+
+load_env_file "${CHECKER_ENV_FILE:-$SCRIPT_DIR/.env}"
+
 # Resolve to absolute path
+if [ ! -d "$CONFIG_DIR" ]; then
+    echo "ERROR: Directory not found: $CONFIG_DIR"
+    exit 2
+fi
 CONFIG_DIR="$(cd "$CONFIG_DIR" && pwd)"
 
 # Default bad_config relative to config dir
@@ -44,8 +91,17 @@ fi
 mkdir -p "$BAD_DIR"
 BAD_DIR="$(cd "$BAD_DIR" && pwd)"
 
+if [ "${CHECKER_DRY_RUN:-0}" = 1 ]; then
+    # Used by tests: show what would be passed to the container.
+    printf '%s=%s\n' HEALTH_URLS "${HEALTH_URLS:-}" FAILOVER_TIMEOUT "${FAILOVER_TIMEOUT:-}" \
+        AWG_UP_TIMEOUT "${AWG_UP_TIMEOUT:-}" SPEED_TEST_URL "${SPEED_TEST_URL:-}" \
+        DNS_PRIMARY "${DNS_PRIMARY:-}" DNS_SECONDARY "${DNS_SECONDARY:-}" \
+        CONFIG_DIR "$CONFIG_DIR" BAD_DIR "$BAD_DIR"
+    exit 0
+fi
+
 # Build image if needed
-if ! docker image inspect amnezia-bridge-failover:local > /dev/null 2>&1; then
+if ! docker image inspect "$IMAGE" > /dev/null 2>&1; then
     echo "--- Building image (first run) ---"
     docker compose -f "$SCRIPT_DIR/docker-compose.yml" build --quiet
 fi
@@ -55,12 +111,12 @@ echo "--- Bad configs will move to: $BAD_DIR ---"
 echo ""
 
 # Keep colors when the host terminal supports them.
-DOCKER_TTY=""
+DOCKER_TTY=()
 if [ -t 1 ]; then
-    DOCKER_TTY="-t"
+    DOCKER_TTY=(-t)
 fi
 
-docker run --rm $DOCKER_TTY \
+docker run --rm ${DOCKER_TTY[@]+"${DOCKER_TTY[@]}"} \
     --cap-add NET_ADMIN \
     --sysctl net.ipv4.conf.all.src_valid_mark=1 \
     --dns "${DNS_PRIMARY:-1.1.1.1}" \
@@ -69,7 +125,9 @@ docker run --rm $DOCKER_TTY \
     -v "$BAD_DIR":/bad_config:rw \
     -e HEALTH_URLS="${HEALTH_URLS:-https://connectivitycheck.gstatic.com/generate_204,https://cp.cloudflare.com/generate_204}" \
     -e FAILOVER_TIMEOUT="${FAILOVER_TIMEOUT:-8}" \
+    -e AWG_UP_TIMEOUT="${AWG_UP_TIMEOUT:-30}" \
+    -e SPEED_TEST_URL="${SPEED_TEST_URL:-}" \
     -e CHECKER_COLOR="${CHECKER_COLOR:-auto}" \
     -e NO_COLOR="${NO_COLOR:-}" \
     --entrypoint /scripts/proxy-checker.sh \
-    amnezia-bridge-failover:local /check_config
+    "$IMAGE" /check_config --bad-dir /bad_config
