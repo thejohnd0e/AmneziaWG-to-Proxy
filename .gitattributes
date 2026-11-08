@@ -1,9 +1,3 @@
-# Container scripts run under /bin/sh and bash: CRLF breaks the shebang and every line.
-* text=auto
-*.sh text eol=lf
-proxy-checker text eol=lf
-Dockerfile text eol=lf
-*.yml text eol=lf
-*.yaml text eol=lf
-*.json5 text eol=lf
-.env.example text eol=lf
+# Keep the whole repository LF: container scripts break with CRLF (shebang and
+# every line), and git archive / ZIP downloads must not reintroduce CR.
+* text=auto eol=lf
